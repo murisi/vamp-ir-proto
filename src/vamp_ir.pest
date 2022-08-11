@@ -1,0 +1,23 @@
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+COMMENT = _{ "%" ~ (!"\n" ~ ANY)* }
+program = _{ SOI ~ statement* ~ EOI }
+statement = { assertion | query }
+assertion = { clause ~ "." }
+query = { clause ~ "?" }
+clause = { literal ~ ":-" ~ body | literal }
+body = { literal ~ ("," ~ literal)* }
+literal = {
+    term ~ relOp ~ term |
+    predicate_sym ~ "(" ~ ")" |
+    predicate_sym ~ "(" ~ terms ~ ")" |
+    predicate_sym
+}
+relOp = { "=" | "!=" }
+predicate_sym = { identifier }
+terms = { term ~ ("," ~ term)* }
+term = { constant | variable }
+constant = { integer | "true" | "false" }
+integer = @{ "-"? ~ (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) }
+char = { ASCII_ALPHANUMERIC | "_" }
+variable = @{ char+ }
+identifier = @{ char+ }
