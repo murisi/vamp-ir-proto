@@ -7,7 +7,7 @@ query = { clause ~ "?" }
 clause = { literal ~ ":-" ~ body | literal }
 body = { literal ~ ("," ~ literal)* }
 literal = {
-    term ~ relOp ~ term |
+    expression ~ relOp ~ expression |
     predicate_sym ~ "(" ~ ")" |
     predicate_sym ~ "(" ~ terms ~ ")" |
     predicate_sym
@@ -16,6 +16,12 @@ relOp = { "=" | "!=" }
 predicate_sym = { identifier }
 terms = { term ~ ("," ~ term)* }
 term = { constant | variable }
+expression = { product ~ (plus_minus ~ product)* }
+product = { value ~ (times_divide ~ value)* }
+value = { term | "(" ~ expression ~ ")" | negate ~ expression }
+negate = { "-" }
+times_divide = { "*" | "/" }
+plus_minus = { "+" | "-" }
 constant = { integer | "true" | "false" }
 integer = @{ "-"? ~ (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) }
 char = { ASCII_ALPHANUMERIC | "_" }

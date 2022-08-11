@@ -87,8 +87,8 @@ impl Clause {
 #[derive(Debug)]
 pub enum Literal {
     Predicate(String, Vec<Term>),
-    Eq(Term, Term),
-    Neq(Term, Term),
+    Eq(Expression, Expression),
+    Neq(Expression, Expression),
 }
 
 impl Literal {
@@ -108,21 +108,23 @@ impl Literal {
                     },
                 ))
             },
-            Rule::term => {
+            Rule::expression => {
                 match pairs.next().expect("expected relational operator").as_span().as_str() {
                     "=" => {
-                        let rhs_pair = pairs.next().expect("expected RHS term");
+                        let rhs_pair = pairs.next().expect("expected RHS expression");
                         Some(Self::Eq(
-                            Term::parse(pair)
-                                .expect("equality literal should start with term"),
-                            Term::parse(rhs_pair).expect("expected RHS to be a term"),
+                            Expression::parse(pair)
+                                .expect("equality literal should start with expression"),
+                            Expression::parse(rhs_pair)
+                                .expect("expected RHS to be a expression"),
                         ))
                     }, "!=" => {
-                        let rhs_pair = pairs.next().expect("expected RHS term");
+                        let rhs_pair = pairs.next().expect("expected RHS expression");
                         Some(Self::Neq(
-                            Term::parse(pair)
-                                .expect("inequality literal should start with term"),
-                            Term::parse(rhs_pair).expect("expected RHS to be a term"),
+                            Expression::parse(pair)
+                                .expect("inequality literal should start with expression"),
+                            Expression::parse(rhs_pair)
+                                .expect("expected RHS to be a expression"),
                         ))
                     }, _ => None,
                 }
@@ -135,7 +137,8 @@ impl Literal {
 #[derive(Debug)]
 pub enum Term {
     Variable(String),
-    Constant(i32),
+    IntConstant(i32),
+    BoolConstant(bool),
 }
 
 impl Term {
@@ -147,10 +150,96 @@ impl Term {
                 Some(Self::Variable(pair.as_span().as_str().to_owned()))
             },
             Rule::constant => {
-                Some(Self::Constant(pair.as_span().as_str().parse().ok()
-                    .expect("constant should be an integer")))
+                match pair.as_span().as_str() {
+                    "true" => Some(Self::BoolConstant(true)),
+                    "false" => Some(Self::BoolConstant(false)),
+                    num => Some(Self::IntConstant(
+                        num.parse().ok().expect("constant should be an integer")
+                    )),
+                    
+                }
             },
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum Expression {
+    Plus(Box<Expression>, Box<Expression>),
+    Minus(Box<Expression>, Box<Expression>),
+    Times(Box<Expression>, Box<Expression>),
+    Divide(Box<Expression>, Box<Expression>),
+    Negate(Box<Expression>),
+    Term(Term),
+}
+
+impl Expression {
+    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
+        if pair.as_rule() != Rule::expression { return None }
+        let mut pairs = pair.into_inner();
+        let pair = pairs.next().expect("expression should not be empty");
+        let mut expr =
+            Self::parse_product(pair).expect("expression should start with product");
+        while let Some(pair) = pairs.next() {
+            match pair.as_span().as_str() {
+                "+" => {
+                    let rhs_pair = pairs.next().expect("expected RHS product");
+                    let rhs = Self::parse_product(rhs_pair)
+                        .expect("expected RHS to be a product");
+                    expr = Self::Plus(Box::new(expr), Box::new(rhs));
+                },
+                "-" => {
+                    let rhs_pair = pairs.next().expect("expected RHS product");
+                    let rhs = Self::parse_product(rhs_pair)
+                        .expect("expected RHS to be a product");
+                    expr = Self::Minus(Box::new(expr), Box::new(rhs));
+                },
+                _ => unreachable!("expression should either be an addition or subtraction"),
+            }
+        }
+        Some(expr)
+    }
+
+    fn parse_product(pair: Pair<Rule>) -> Option<Self> {
+        if pair.as_rule() != Rule::product { return None }
+        let mut pairs = pair.into_inner();
+        let pair = pairs.next().expect("product should not be empty");
+        let mut product =
+            Self::parse_value(pair).expect("product should start with value");
+        while let Some(pair) = pairs.next() {
+            match pair.as_span().as_str() {
+                "*" => {
+                    let rhs_pair = pairs.next().expect("expected RHS value");
+                    let rhs = Self::parse_value(rhs_pair)
+                        .expect("expected RHS to be a value");
+                    product = Self::Times(Box::new(product), Box::new(rhs));
+                },
+                "/" => {
+                    let rhs_pair = pairs.next().expect("expected RHS value");
+                    let rhs = Self::parse_value(rhs_pair)
+                        .expect("expected RHS to be a value");
+                    product = Self::Divide(Box::new(product), Box::new(rhs));
+                },
+                _ => unreachable!("expression should either be a multiplication or division"),
+            }
+        }
+        Some(product)
+    }
+
+    fn parse_value(pair: Pair<Rule>) -> Option<Self> {
+        if pair.as_rule() != Rule::value { return None }
+        let mut pairs = pair.into_inner();
+        let pair = pairs.next().expect("value should not be empty");
+        match pair.as_rule() {
+            Rule::term => Term::parse(pair).map(Expression::Term),
+            Rule::expression => Self::parse(pair),
+            Rule::negate => {
+                let pair =
+                    pairs.next().expect("negation operator should be followed by expression");
+                Expression::parse(pair).map(|x| Expression::Negate(Box::new(x)))
+            },
+            _ => unreachable!("value should either be negation, term, or expression"),
         }
     }
 }
