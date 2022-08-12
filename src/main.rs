@@ -62,7 +62,7 @@ impl Statement {
 
 #[derive(Debug)]
 pub struct Clause {
-    pub head: Literal,
+    pub head: Predicate,
     pub body: Vec<Literal>,
 }
 
@@ -71,9 +71,9 @@ impl Clause {
         if pair.as_rule() != Rule::clause { return None }
         let mut pairs = pair.into_inner();
         Some(Self {
-            head: Literal::parse(
-                pairs.next().expect("clause should have at least one literal")
-            ).expect("clause head should be a literal"),
+            head: Predicate::parse(
+                pairs.next().expect("clause should start with predicate")
+            ).expect("clause head should be a predicate"),
             body: if let Some(pair) = pairs.next() {
                 pair.into_inner().map(Literal::parse).collect::<Option<Vec<_>>>()
                     .expect("clause body should be sequence of literals")
@@ -86,7 +86,7 @@ impl Clause {
 
 #[derive(Debug)]
 pub enum Literal {
-    Predicate(String, Vec<Term>),
+    Predicate(Predicate),
     Eq(Expression, Expression),
     Neq(Expression, Expression),
 }
@@ -97,15 +97,9 @@ impl Literal {
         let mut pairs = pair.into_inner();
         let pair = pairs.next().expect("literal cannot be empty");
         match pair.as_rule() {
-            Rule::predicate_sym => {
+            Rule::predicate => {
                 Some(Literal::Predicate(
-                    pair.as_span().as_str().to_owned(),
-                    if let Some(pair) = pairs.next() {
-                        pair.into_inner().map(Term::parse).collect::<Option<Vec<_>>>()
-                            .expect("literal body should be a sequence of terms")
-                    } else {
-                        vec![]
-                    },
+                    Predicate::parse(pair).expect("literal should only contain predicate"),
                 ))
             },
             Rule::expression => {
@@ -135,10 +129,35 @@ impl Literal {
 }
 
 #[derive(Debug)]
+pub struct Predicate {
+    pub symbol: String,
+    pub terms: Vec<Term>,
+}
+
+impl Predicate {
+    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
+        if pair.as_rule() != Rule::predicate { return None }
+        let mut pairs = pair.into_inner();
+        let pair = pairs.next().expect("predicate should not be empty");
+        if pair.as_rule() != Rule::predicate_sym {
+            unreachable!("predicate should start with symbol")
+        }
+        Some(Self {
+            symbol: pair.as_span().as_str().to_owned(),
+            terms: if let Some(pair) = pairs.next() {
+                pair.into_inner().map(Term::parse).collect::<Option<Vec<_>>>()
+                    .expect("literal body should be a sequence of terms")
+            } else {
+                vec![]
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
 pub enum Term {
     Variable(String),
-    IntConstant(i32),
-    BoolConstant(bool),
+    Constant(i32),
 }
 
 impl Term {
@@ -150,14 +169,9 @@ impl Term {
                 Some(Self::Variable(pair.as_span().as_str().to_owned()))
             },
             Rule::constant => {
-                match pair.as_span().as_str() {
-                    "true" => Some(Self::BoolConstant(true)),
-                    "false" => Some(Self::BoolConstant(false)),
-                    num => Some(Self::IntConstant(
-                        num.parse().ok().expect("constant should be an integer")
-                    )),
-                    
-                }
+                Some(Self::Constant(
+                    pair.as_span().as_str().parse().ok().expect("constant should be an integer")
+                ))
             },
             _ => None,
         }

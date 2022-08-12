@@ -4,15 +4,11 @@ program = _{ SOI ~ statement* ~ EOI }
 statement = { assertion | query }
 assertion = { clause ~ "." }
 query = { clause ~ "?" }
-clause = { literal ~ ":-" ~ body | literal }
+clause = { predicate ~ (":-" ~ body)? }
 body = { literal ~ ("," ~ literal)* }
-literal = {
-    expression ~ relOp ~ expression |
-    predicate_sym ~ "(" ~ ")" |
-    predicate_sym ~ "(" ~ terms ~ ")" |
-    predicate_sym
-}
+literal = { expression ~ relOp ~ expression | predicate }
 relOp = { "=" | "!=" }
+predicate = { predicate_sym ~ ("(" ~ terms? ~ ")")? }
 predicate_sym = { identifier }
 terms = { term ~ ("," ~ term)* }
 term = { constant | variable }
@@ -22,7 +18,7 @@ value = { term | "(" ~ expression ~ ")" | negate ~ expression }
 negate = { "-" }
 times_divide = { "*" | "/" }
 plus_minus = { "+" | "-" }
-constant = { integer | "true" | "false" }
+constant = { integer }
 integer = @{ "-"? ~ (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) }
 char = { ASCII_ALPHANUMERIC | "_" }
 variable = @{ char+ }
