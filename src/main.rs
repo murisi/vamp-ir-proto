@@ -229,6 +229,30 @@ fn bind_program_variables(target: &mut Program, curr_var_id: &mut u32) {
     }
 }
 
+/* After the addition of multiplexer constraints, the clause bodies contained by
+ * predicate literals are equivalent to the predicate literals themselves. So
+ * just replace the predicate literals with these clause bodies. */
+fn flatten_program(target: &mut Program) {
+    for clauses in target.assertions.values_mut() {
+        for clause in clauses {
+            let mut new_body = vec![];
+            for literal in clause.body.drain(..) {
+                match literal {
+                    Literal::Predicate(p) => {
+                        for mut clause in p.clauses {
+                            new_body.append(&mut clause.body);
+                        }
+                    },
+                    rel @ Literal::Relation(_, _, _) => {
+                        new_body.push(rel);
+                    }
+                }
+            }
+            clause.body = new_body;
+        }
+    }
+}
+
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
     let mut curr_var_id = 0;
@@ -240,6 +264,7 @@ fn main() {
     number_program_variables(&mut target_program, &mut curr_var_id);
     substitute_program(&mut target_program, current_program);
     bind_program_variables(&mut target_program, &mut curr_var_id);
+    flatten_program(&mut target_program);
     current_program = target_program;
     println!("{:#?}", current_program);
 }
