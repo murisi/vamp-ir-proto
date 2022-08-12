@@ -1,268 +1,245 @@
+mod ast;
 extern crate pest;
 #[macro_use]
 extern crate pest_derive;
-use pest::Parser;
-use pest::iterators::Pair;
 use std::fs;
+use std::collections::{BTreeSet, HashMap};
+use crate::ast::{Program, Literal, Term, Variable, RelOp, Expression, Clause, ArithOp};
 
-#[derive(Parser)]
-#[grammar = "vamp_ir.pest"]
-pub struct VampIRParser;
-
-#[derive(Debug)]
-pub struct Program {
-    pub statements: Vec<Statement>,
-}
-
-impl Program {
-    pub fn parse(unparsed_file: &str) -> Result<Self, pest::error::Error<Rule>> {
-        let mut pairs = VampIRParser::parse(Rule::program, &unparsed_file)?;
-        let mut statements = vec![];
-        while let Some(pair) = pairs.next() {
-            match pair.as_rule() {
-                Rule::statement => {
-                    statements.push(Statement::parse(pair).expect("expected statement"))
-                },
-                Rule::EOI => return Ok(Self { statements }),
-                _ => unreachable!("program should either be statement or EOI")
-            }
-        }
-        unreachable!("EOI should have been encountered")
-    }
-}
-
-#[derive(Debug)]
-pub enum Statement {
-    Assertion(Clause),
-    Query(Predicate),
-}
-
-impl Statement {
-    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::statement { return None }
-        let pair = pair.into_inner().next()
-            .expect("statement should not be empty");
-        match pair.as_rule() {
-            Rule::assertion => {
-                let pair = pair.into_inner().next()
-                    .expect("assertion should not be empty");
-                Some(Self::Assertion(Clause::parse(pair)
-                                     .expect("assertion should have exactly one clause")))
-            },
-            Rule::query => {
-                let pair = pair.into_inner().next()
-                    .expect("query should not be empty");
-                Some(Self::Query(Predicate::parse(pair)
-                                 .expect("query should have exactly one literal")))
-            },
-            _ => unreachable!("statement should either be assertion or query"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Clause {
-    pub head: Predicate,
-    pub body: Vec<Literal>,
-}
-
-impl Clause {
-    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::clause { return None }
-        let mut pairs = pair.into_inner();
-        Some(Self {
-            head: Predicate::parse(
-                pairs.next().expect("clause should start with predicate")
-            ).expect("clause head should be a predicate"),
-            body: if let Some(pair) = pairs.next() {
-                pair.into_inner().map(Literal::parse).collect::<Option<Vec<_>>>()
-                    .expect("clause body should be sequence of literals")
+/* If this term is a variable, then give that variable the ID corresponding to
+ * its name in the map. If this is not possible, then take out a fresh variable
+ * ID and assign that instead. */
+fn number_term_variable(
+    term: &mut Term,
+    curr_var_id: &mut u32,
+    assignments: &mut HashMap<String, u32>
+) {
+    if let Term::Variable(var) = term {
+        if let Some(name) = &var.name {
+            if let Some(id) = assignments.get(name) {
+                var.id = *id;
             } else {
-                vec![]
-            },
-        })
-    }
-}
-
-#[derive(Debug)]
-pub enum Literal {
-    Predicate(Predicate),
-    Relation(RelOp, Expression, Expression),
-}
-
-impl Literal {
-    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::literal { return None }
-        let mut pairs = pair.into_inner();
-        let pair = pairs.next().expect("literal cannot be empty");
-        match pair.as_rule() {
-            Rule::predicate => {
-                Some(Literal::Predicate(
-                    Predicate::parse(pair).expect("literal should only contain predicate"),
-                ))
-            },
-            Rule::expression => {
-                let op = RelOp::parse(pairs.next().expect("expected relational operator"))
-                    .expect("expected relational operator");
-                let rhs_pair = pairs.next().expect("expected RHS expression");
-                Some(Self::Relation(
-                    op,
-                    Expression::parse(pair)
-                        .expect("equality literal should start with expression"),
-                    Expression::parse(rhs_pair)
-                        .expect("expected RHS to be a expression"),
-                ))
-            },
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum RelOp { Eq, Ne }
-
-impl RelOp {
-    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::relOp { return None }
-        match pair.as_span().as_str() {
-            "=" => Some(Self::Eq),
-            "!=" => Some(Self::Ne),
-            _ => unreachable!("Encountered unknown relational operator")
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Predicate {
-    pub symbol: String,
-    pub terms: Vec<Term>,
-}
-
-impl Predicate {
-    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::predicate { return None }
-        let mut pairs = pair.into_inner();
-        let pair = pairs.next().expect("predicate should not be empty");
-        if pair.as_rule() != Rule::predicate_sym {
-            unreachable!("predicate should start with symbol")
-        }
-        Some(Self {
-            symbol: pair.as_span().as_str().to_owned(),
-            terms: if let Some(pair) = pairs.next() {
-                pair.into_inner().map(Term::parse).collect::<Option<Vec<_>>>()
-                    .expect("literal body should be a sequence of terms")
-            } else {
-                vec![]
-            },
-        })
-    }
-}
-
-#[derive(Debug)]
-pub enum Term {
-    Variable(String),
-    Constant(i32),
-}
-
-impl Term {
-    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::term { return None }
-        let pair = pair.into_inner().next().expect("term should not be empty");
-        match pair.as_rule() {
-            Rule::variable => {
-                Some(Self::Variable(pair.as_span().as_str().to_owned()))
-            },
-            Rule::constant => {
-                Some(Self::Constant(
-                    pair.as_span().as_str().parse().ok().expect("constant should be an integer")
-                ))
-            },
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum Expression {
-    Term(Term),
-    Negate(Box<Expression>),
-    Binary(ArithOp, Box<Expression>, Box<Expression>),
-}
-
-impl Expression {
-    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::expression { return None }
-        let mut pairs = pair.into_inner();
-        let pair = pairs.next().expect("expression should not be empty");
-        let mut expr =
-            Self::parse_product(pair).expect("expression should start with product");
-        while let Some(pair) = pairs.next() {
-            let op = ArithOp::parse(pair).expect("expected arithmetic operator");
-            let rhs_pair = pairs.next().expect("expected RHS product");
-            let rhs = Self::parse_product(rhs_pair)
-                .expect("expected RHS to be a product");
-            expr = Self::Binary(op, Box::new(expr), Box::new(rhs));
-        }
-        Some(expr)
-    }
-
-    fn parse_product(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::product { return None }
-        let mut pairs = pair.into_inner();
-        let pair = pairs.next().expect("product should not be empty");
-        let mut product =
-            Self::parse_value(pair).expect("product should start with value");
-        while let Some(pair) = pairs.next() {
-            let op = ArithOp::parse(pair).expect("expected arithmetic operator");
-            let rhs_pair = pairs.next().expect("expected RHS value");
-            let rhs = Self::parse_value(rhs_pair)
-                .expect("expected RHS to be a value");
-            product = Self::Binary(op, Box::new(product), Box::new(rhs));
-        }
-        Some(product)
-    }
-
-    fn parse_value(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() != Rule::value { return None }
-        let mut pairs = pair.into_inner();
-        let pair = pairs.next().expect("value should not be empty");
-        match pair.as_rule() {
-            Rule::term => Term::parse(pair).map(Expression::Term),
-            Rule::expression => Self::parse(pair),
-            Rule::negate => {
-                let pair =
-                    pairs.next().expect("negation operator should be followed by expression");
-                Expression::parse(pair).map(|x| Expression::Negate(Box::new(x)))
-            },
-            _ => unreachable!("value should either be negation, term, or expression"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum ArithOp { Times, Divide, Plus, Minus }
-
-impl ArithOp {
-    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
-        if pair.as_rule() == Rule::plus_minus {
-            match pair.as_span().as_str() {
-                "+" => Some(Self::Plus),
-                "-" => Some(Self::Minus),
-                _ => unreachable!("Encountered unexpected arithmetic operator")
-            }
-        } else if pair.as_rule() == Rule::times_divide {
-            match pair.as_span().as_str() {
-                "*" => Some(Self::Times),
-                "/" => Some(Self::Divide),
-                _ => unreachable!("Encountered unexpected arithmetic operator")
+                assignments.insert(name.clone(), *curr_var_id);
+                var.id = *curr_var_id;
+                *curr_var_id += 1;
             }
         } else {
-            None
+            var.id = *curr_var_id;
+            *curr_var_id += 1;
         }
+    }
+}
+
+/* Number all the variables occuring in the given expression using the IDs from
+ * the given map. In the cases where there's no existing map entry, take out a
+ * fresh ID and put that in the map. */
+fn number_expr_variables(
+    target: &mut Expression,
+    curr_var_id: &mut u32,
+    assignments: &mut HashMap<String, u32>
+) {
+    match target {
+        Expression::Term(term) => {
+            number_term_variable(term, curr_var_id, assignments);
+        },
+        Expression::Negate(expr) => {
+            number_expr_variables(expr, curr_var_id, assignments);
+        },
+        Expression::Binary(_op, expr1, expr2) => {
+            number_expr_variables(expr1, curr_var_id, assignments);
+            number_expr_variables(expr2, curr_var_id, assignments);
+        }
+    }
+}
+
+/* Number all the variables occuring in the given clause using the IDs from the
+ * given map. In the cases where there's no existing map entry, take out a fresh
+ * ID and put that in the map. */
+fn number_clause_variables(target: &mut Clause, curr_var_id: &mut u32) {
+    let mut assignments = HashMap::<String, u32>::new();
+    for term in &mut target.head.terms {
+        number_term_variable(term, curr_var_id, &mut assignments);
+    }
+    for literal in &mut target.body {
+        match literal {
+            Literal::Predicate(pred) => {
+                for term in &mut pred.terms {
+                    number_term_variable(term, curr_var_id, &mut assignments);
+                }
+                for clause in &mut pred.clauses {
+                    number_clause_variables(clause, curr_var_id);
+                }
+            },
+            Literal::Relation(_op, expr1, expr2) => {
+                number_expr_variables(expr1, curr_var_id, &mut assignments);
+                number_expr_variables(expr2, curr_var_id, &mut assignments);
+            }
+        }
+    }
+}
+
+/* Number all the variables occuring in the given program using the IDs from the
+ * given map. In the cases where there's no existing map entry, take out a fresh
+ * ID and put that in the map. */
+fn number_program_variables(target: &mut Program, curr_var_id: &mut u32) {
+    for query in &mut target.queries {
+        let mut assignments = HashMap::<String, u32>::new();
+        for term in &mut query.terms {
+            number_term_variable(term, curr_var_id, &mut assignments);
+        }
+    }
+    for clauses in target.assertions.values_mut() {
+        for clause in clauses {
+            number_clause_variables(clause, curr_var_id);
+        }
+    }
+}
+
+/* Make sure that the head of each clause comprises entirely of unique
+ * variables. Do this be replacing constants and duplicate variables with fresh
+ * ones, and by adding equality constraints to the body. This will simplify the
+ * substitution of values into clauses. */
+fn unique_variable_heads(target: &mut Program, curr_var_id: &mut u32) {
+    for clauses in target.assertions.values_mut() {
+        for clause in clauses {
+            let mut prev_vars = BTreeSet::new();
+            for term in &mut clause.head.terms {
+                if let Term::Variable(var) = term {
+                    if !prev_vars.contains(var) {
+                        continue;
+                    }
+                }
+                let new_var = Variable::new(*curr_var_id);
+                prev_vars.insert(new_var.clone());
+                let new_term = Term::Variable(new_var);
+                *curr_var_id += 1;
+                clause.body.push(Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(new_term.clone()),
+                    Expression::Term(term.clone())
+                ));
+                *term = new_term;
+            }
+        }
+    }
+}
+
+/* Substitute the clauses of the source program into the predicates of the
+ * target that reference them. This transformation does not inline the
+ * variables. */
+fn substitute_program(target: &mut Program, source: Program) {
+    for query in &mut target.queries {
+        if let Some(clauses) = source.assertions.get(&query.signature()) {
+            query.clauses = clauses.clone();
+        }
+    }
+    for clauses in target.assertions.values_mut() {
+        for clause in clauses {
+            for literal in &mut clause.body {
+                if let Literal::Predicate(pred) = literal {
+                    if let Some(clauses) = source.assertions.get(&pred.signature()) {
+                        pred.clauses = clauses.clone();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* Produces an expression that is non-zero only if the select line is carrying
+ * the given index or if outside the given range. */
+fn build_multiplexer(select_line: Expression, idx: usize, size: usize) -> Expression {
+    let mut multiplexer = Expression::Term(Term::Constant(1));
+    for j in 0..size {
+        if j != idx {
+            multiplexer = Expression::Binary(
+                ArithOp::Times,
+                Box::new(multiplexer),
+                Box::new(Expression::Binary(
+                    ArithOp::Minus,
+                    Box::new(select_line.clone()),
+                    Box::new(Expression::Term(Term::Constant(j as i32))),
+                )),
+            );
+        }
+    }
+    multiplexer
+}
+
+/* Produces a literal that forces either expr1=expr2 or else_expr=0. */
+fn equality_or_sat(expr1: Expression, expr2: Expression, else_expr: Expression) -> Literal {
+    Literal::Relation(
+        RelOp::Eq,
+        Expression::Term(Term::Constant(0)),
+        Expression::Binary(
+            ArithOp::Times,
+            Box::new(else_expr.clone()),
+            Box::new(Expression::Binary(
+                ArithOp::Minus,
+                Box::new(expr1),
+                Box::new(expr2),
+            ))
+        )
+    )
+}
+
+/* Force each predicate literal in the clause to unify with at least one of the
+ * heads of the clauses of the relation it refers to. Return false only if a
+ * literal within the clause has no possible unification. */
+fn bind_clause_variables(clause: &mut Clause, curr_var_id: &mut u32) -> bool {
+    let mut clause_constraints = vec![];
+    for literal in &clause.body {
+        if let Literal::Predicate(pred) = literal {
+            if pred.clauses.is_empty() { return false }
+            let select_line =
+                Expression::Term(Term::Variable(Variable::new(*curr_var_id)));
+            *curr_var_id += 1;
+            for (idx, clause) in pred.clauses.iter().enumerate() {
+                let multiplexer =
+                    build_multiplexer(select_line.clone(), idx, pred.clauses.len());
+                
+                let assignments = clause
+                    .head
+                    .terms
+                    .iter()
+                    .cloned()
+                    .zip(pred.terms.iter().cloned());
+                /* If the prover selects this clause, then force each parameter
+                 * to equal the corresponding head parameter. */
+                for (term1, term2) in assignments {
+                    clause_constraints.push(equality_or_sat(
+                        Expression::Term(term1),
+                        Expression::Term(term2),
+                        multiplexer.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    clause.body.append(&mut clause_constraints);
+    true
+}
+
+/* At the top-level, force each predicate literal to unify with at least one of
+ * their corresponding clause heads. Delete clauses that have literals with no
+ * possible unification. */
+fn bind_program_variables(target: &mut Program, curr_var_id: &mut u32) {
+    for clauses in target.assertions.values_mut() {
+        clauses.retain_mut(|clause| bind_clause_variables(clause, curr_var_id));
     }
 }
 
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
-    println!("{:?}", Program::parse(&unparsed_file));
+    let mut curr_var_id = 0;
+    let orig_program = Program::parse(&unparsed_file).unwrap();
+    let mut current_program = orig_program.clone();
+    number_program_variables(&mut current_program, &mut curr_var_id);
+    
+    let mut target_program = orig_program.clone();
+    number_program_variables(&mut target_program, &mut curr_var_id);
+    substitute_program(&mut target_program, current_program);
+    bind_program_variables(&mut target_program, &mut curr_var_id);
+    current_program = target_program;
+    println!("{:#?}", current_program);
 }
