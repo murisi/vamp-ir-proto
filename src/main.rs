@@ -34,7 +34,7 @@ impl Program {
 #[derive(Debug)]
 pub enum Statement {
     Assertion(Clause),
-    Query(Literal),
+    Query(Predicate),
 }
 
 impl Statement {
@@ -52,7 +52,7 @@ impl Statement {
             Rule::query => {
                 let pair = pair.into_inner().next()
                     .expect("query should not be empty");
-                Some(Self::Query(Literal::parse(pair)
+                Some(Self::Query(Predicate::parse(pair)
                                  .expect("query should have exactly one literal")))
             },
             _ => unreachable!("statement should either be assertion or query"),
@@ -87,8 +87,7 @@ impl Clause {
 #[derive(Debug)]
 pub enum Literal {
     Predicate(Predicate),
-    Eq(Expression, Expression),
-    Neq(Expression, Expression),
+    Relation(RelOp, Expression, Expression),
 }
 
 impl Literal {
@@ -103,27 +102,32 @@ impl Literal {
                 ))
             },
             Rule::expression => {
-                match pairs.next().expect("expected relational operator").as_span().as_str() {
-                    "=" => {
-                        let rhs_pair = pairs.next().expect("expected RHS expression");
-                        Some(Self::Eq(
-                            Expression::parse(pair)
-                                .expect("equality literal should start with expression"),
-                            Expression::parse(rhs_pair)
-                                .expect("expected RHS to be a expression"),
-                        ))
-                    }, "!=" => {
-                        let rhs_pair = pairs.next().expect("expected RHS expression");
-                        Some(Self::Neq(
-                            Expression::parse(pair)
-                                .expect("inequality literal should start with expression"),
-                            Expression::parse(rhs_pair)
-                                .expect("expected RHS to be a expression"),
-                        ))
-                    }, _ => None,
-                }
+                let op = RelOp::parse(pairs.next().expect("expected relational operator"))
+                    .expect("expected relational operator");
+                let rhs_pair = pairs.next().expect("expected RHS expression");
+                Some(Self::Relation(
+                    op,
+                    Expression::parse(pair)
+                        .expect("equality literal should start with expression"),
+                    Expression::parse(rhs_pair)
+                        .expect("expected RHS to be a expression"),
+                ))
             },
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RelOp { Eq, Ne }
+
+impl RelOp {
+    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
+        if pair.as_rule() != Rule::relOp { return None }
+        match pair.as_span().as_str() {
+            "=" => Some(Self::Eq),
+            "!=" => Some(Self::Ne),
+            _ => unreachable!("Encountered unknown relational operator")
         }
     }
 }
@@ -180,12 +184,9 @@ impl Term {
 
 #[derive(Debug)]
 pub enum Expression {
-    Plus(Box<Expression>, Box<Expression>),
-    Minus(Box<Expression>, Box<Expression>),
-    Times(Box<Expression>, Box<Expression>),
-    Divide(Box<Expression>, Box<Expression>),
-    Negate(Box<Expression>),
     Term(Term),
+    Negate(Box<Expression>),
+    Binary(ArithOp, Box<Expression>, Box<Expression>),
 }
 
 impl Expression {
@@ -196,21 +197,11 @@ impl Expression {
         let mut expr =
             Self::parse_product(pair).expect("expression should start with product");
         while let Some(pair) = pairs.next() {
-            match pair.as_span().as_str() {
-                "+" => {
-                    let rhs_pair = pairs.next().expect("expected RHS product");
-                    let rhs = Self::parse_product(rhs_pair)
-                        .expect("expected RHS to be a product");
-                    expr = Self::Plus(Box::new(expr), Box::new(rhs));
-                },
-                "-" => {
-                    let rhs_pair = pairs.next().expect("expected RHS product");
-                    let rhs = Self::parse_product(rhs_pair)
-                        .expect("expected RHS to be a product");
-                    expr = Self::Minus(Box::new(expr), Box::new(rhs));
-                },
-                _ => unreachable!("expression should either be an addition or subtraction"),
-            }
+            let op = ArithOp::parse(pair).expect("expected arithmetic operator");
+            let rhs_pair = pairs.next().expect("expected RHS product");
+            let rhs = Self::parse_product(rhs_pair)
+                .expect("expected RHS to be a product");
+            expr = Self::Binary(op, Box::new(expr), Box::new(rhs));
         }
         Some(expr)
     }
@@ -222,21 +213,11 @@ impl Expression {
         let mut product =
             Self::parse_value(pair).expect("product should start with value");
         while let Some(pair) = pairs.next() {
-            match pair.as_span().as_str() {
-                "*" => {
-                    let rhs_pair = pairs.next().expect("expected RHS value");
-                    let rhs = Self::parse_value(rhs_pair)
-                        .expect("expected RHS to be a value");
-                    product = Self::Times(Box::new(product), Box::new(rhs));
-                },
-                "/" => {
-                    let rhs_pair = pairs.next().expect("expected RHS value");
-                    let rhs = Self::parse_value(rhs_pair)
-                        .expect("expected RHS to be a value");
-                    product = Self::Divide(Box::new(product), Box::new(rhs));
-                },
-                _ => unreachable!("expression should either be a multiplication or division"),
-            }
+            let op = ArithOp::parse(pair).expect("expected arithmetic operator");
+            let rhs_pair = pairs.next().expect("expected RHS value");
+            let rhs = Self::parse_value(rhs_pair)
+                .expect("expected RHS to be a value");
+            product = Self::Binary(op, Box::new(product), Box::new(rhs));
         }
         Some(product)
     }
@@ -254,6 +235,29 @@ impl Expression {
                 Expression::parse(pair).map(|x| Expression::Negate(Box::new(x)))
             },
             _ => unreachable!("value should either be negation, term, or expression"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ArithOp { Times, Divide, Plus, Minus }
+
+impl ArithOp {
+    pub fn parse(pair: Pair<Rule>) -> Option<Self> {
+        if pair.as_rule() == Rule::plus_minus {
+            match pair.as_span().as_str() {
+                "+" => Some(Self::Plus),
+                "-" => Some(Self::Minus),
+                _ => unreachable!("Encountered unexpected arithmetic operator")
+            }
+        } else if pair.as_rule() == Rule::times_divide {
+            match pair.as_span().as_str() {
+                "*" => Some(Self::Times),
+                "/" => Some(Self::Divide),
+                _ => unreachable!("Encountered unexpected arithmetic operator")
+            }
+        } else {
+            None
         }
     }
 }
