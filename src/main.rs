@@ -198,6 +198,9 @@ fn substitute_program(target: &mut Program, source: Program, curr_var_id: &mut u
     for query in &mut target.queries {
         if let Some(clauses) = source.assertions.get(&query.signature()) {
             query.clauses = clauses.clone();
+            for clause in query.clauses.iter_mut() {
+                fresh_clause_variables(clause, curr_var_id);
+            }
         }
     }
     for clauses in target.assertions.values_mut() {
@@ -205,11 +208,10 @@ fn substitute_program(target: &mut Program, source: Program, curr_var_id: &mut u
             for literal in &mut clause.body {
                 if let Literal::Predicate(pred) = literal {
                     if let Some(clauses) = source.assertions.get(&pred.signature()) {
-                        let mut clauses = clauses.clone();
-                        for clause in clauses.iter_mut() {
+                        pred.clauses = clauses.clone();
+                        for clause in pred.clauses.iter_mut() {
                             fresh_clause_variables(clause, curr_var_id);
                         }
-                        pred.clauses = clauses;
                     }
                 }
             }
