@@ -356,9 +356,130 @@ fn iterate_program(base_program: &Program, pow: u32) -> Program {
         substitute_program(&mut target_program, current_program, &mut curr_var_id);
         bind_program_variables(&mut target_program, &mut curr_var_id);
         flatten_program(&mut target_program);
+        flatten_program_expressions(&mut target_program, &mut curr_var_id);
         current_program = target_program;
     }
     current_program
+}
+
+/* Flatten the given expression down to a single term and place the definitions
+ * of its parts into the given vector. The parts always take the following form:
+ * term1 = -term2 or term1 = term2 OP term3 */
+fn flatten_expression(
+    expr: &Expression,
+    literals: &mut Vec<Literal>,
+    curr_var_id: &mut u32,
+) -> Term {
+    match expr {
+        Expression::Term(t) => t.clone(),
+        Expression::Negate(n) => {
+            let inner = flatten_expression(n, literals, curr_var_id);
+            let new_var = Term::Variable(Variable::new(*curr_var_id));
+            *curr_var_id += 1;
+            let new_term = Literal::Relation(
+                RelOp::Eq,
+                Expression::Term(new_var.clone()),
+                Expression::Negate(Box::new(Expression::Term(inner)))
+            );
+            literals.push(new_term);
+            new_var
+        },
+        Expression::Binary(op, e1, e2) => {
+            let inner1 = flatten_expression(e1, literals, curr_var_id);
+            let inner2 = flatten_expression(e2, literals, curr_var_id);
+            let new_var = Term::Variable(Variable::new(*curr_var_id));
+            *curr_var_id += 1;
+            let new_term = Literal::Relation(
+                RelOp::Eq,
+                Expression::Term(new_var.clone()),
+                Expression::Binary(
+                    op.clone(),
+                    Box::new(Expression::Term(inner1)),
+                    Box::new(Expression::Term(inner2)),
+                )
+            );
+            literals.push(new_term);
+            new_var
+        }
+    }
+}
+
+/* If the given literal contains expression trees, then produce an equivalent
+ * literal that uses only one expression tree of height one. */
+fn flatten_literal_expressions(
+    literal: Literal,
+    literals: &mut Vec<Literal>,
+    curr_var_id: &mut u32,
+) -> Literal {
+    match literal.clone() {
+        Literal::Relation(RelOp::Ne, _, _) =>
+            unreachable!("not equal literals should not be present at this stage"),
+        Literal::Predicate(_) => literal,
+        // If the given literal is already in three address from, then do not
+        // try to flatten it again
+        Literal::Relation(
+            RelOp::Eq,
+            Expression::Term(_),
+            Expression::Term(_),
+        ) => literal,
+        Literal::Relation(
+            RelOp::Eq,
+            Expression::Term(_),
+            Expression::Negate(e),
+        ) if matches!(&*e, Expression::Term(_)) => literal,
+        Literal::Relation(
+            RelOp::Eq,
+            Expression::Term(_),
+            Expression::Binary(_, e1, e2),
+        ) if matches!((&*e1, &*e2), (Expression::Term(_), Expression::Term(_))) => literal,
+        // Literal is not in three address form, so flatten it
+        Literal::Relation(RelOp::Eq, e1, e2) => {
+            let lhs_term = flatten_expression(
+                &Expression::Binary(
+                    ArithOp::Minus,
+                    Box::new(e1.clone()),
+                    Box::new(e2.clone()),
+                ),
+                literals,
+                curr_var_id
+            );
+            Literal::Relation(
+                RelOp::Eq,
+                Expression::Term(lhs_term),
+                Expression::Term(Term::Constant(0))
+            )
+        }
+    }
+}
+
+/* Flatten all expressions occuring in the clause, creating additional literals
+ * as necessary. */
+fn flatten_clause_expressions(
+    clause: &mut Clause,
+    curr_var_id: &mut u32,
+) {
+    let mut expr_literals = Vec::new();
+    for literal in clause.body.iter_mut() {
+        *literal = flatten_literal_expressions(
+            literal.clone(),
+            &mut expr_literals,
+            curr_var_id,
+        );
+    }
+    clause.body.append(&mut expr_literals);
+}
+
+/* Flatten all expressions occuring in the program, creating additional clause
+ * literals as necessary. */
+fn flatten_program_expressions(
+    program: &mut Program,
+    curr_var_id: &mut u32,
+) {
+    for clauses in program.assertions.values_mut() {
+        for clause in clauses {
+            flatten_clause_expressions(clause, curr_var_id);
+        }
+    }
 }
 
 fn main() {
