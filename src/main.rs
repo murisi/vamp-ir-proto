@@ -324,11 +324,28 @@ fn flatten_program(target: &mut Program) {
     }
 }
 
+/* Recursive programs cannot be expanded ad-infinitum. Hence when the point is
+ * reached when the expansions are sufficient, clauses that still invoke other
+ * predicates must be cut-off. */
+fn bottom_out_recursion(target: &mut Program) {
+    for clauses in target.assertions.values_mut() {
+        clauses.retain(|clause| {
+            for literal in &clause.body {
+                if let Literal::Predicate(_) = literal {
+                    return false;
+                }
+            }
+            true
+        });
+    }
+}
+
 /* Substitute the given program into itself the given number of times. This
  * function ensures that each clause instantiation receives fesh variables. */
 fn iterate_program(base_program: &Program, pow: u32) -> Program {
     let mut curr_var_id = 0;
     let mut current_program = base_program.clone();
+    bottom_out_recursion(&mut current_program);
     number_program_variables(&mut current_program, &mut curr_var_id);
 
     for _i in 1..pow {
@@ -345,5 +362,5 @@ fn iterate_program(base_program: &Program, pow: u32) -> Program {
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
     let orig_program = Program::parse(&unparsed_file).unwrap();
-    println!("{:#?}", iterate_program(&orig_program, 2));
+    println!("{:#?}", iterate_program(&orig_program, 3));
 }
