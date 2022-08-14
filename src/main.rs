@@ -95,6 +95,73 @@ fn number_program_variables(target: &mut Program, curr_var_id: &mut u32) {
     }
 }
 
+/* If this term is a variable, then give that variable the ID corresponding to
+ * its ID in the map. If this is not possible, then take out a fresh variable
+ * ID and assign that instead. */
+fn fresh_term_variable(
+    term: &mut Term,
+    curr_var_id: &mut u32,
+    assignments: &mut HashMap<u32, u32>
+) {
+    if let Term::Variable(var) = term {
+        if let Some(id) = assignments.get(&var.id) {
+            var.id = *id;
+        } else {
+            assignments.insert(var.id, *curr_var_id);
+            var.id = *curr_var_id;
+            *curr_var_id += 1;
+        }
+    }
+}
+
+/* Number all the variables occuring in the given expression using the IDs from
+ * the given map. In the cases where there's no existing map entry, take out a
+ * fresh ID and put that in the map. */
+fn fresh_expr_variables(
+    target: &mut Expression,
+    curr_var_id: &mut u32,
+    assignments: &mut HashMap<u32, u32>
+) {
+    match target {
+        Expression::Term(term) => {
+            fresh_term_variable(term, curr_var_id, assignments);
+        },
+        Expression::Negate(expr) => {
+            fresh_expr_variables(expr, curr_var_id, assignments);
+        },
+        Expression::Binary(_op, expr1, expr2) => {
+            fresh_expr_variables(expr1, curr_var_id, assignments);
+            fresh_expr_variables(expr2, curr_var_id, assignments);
+        }
+    }
+}
+
+/* Number all the variables occuring in the given clause using the IDs from the
+ * given map. In the cases where there's no existing map entry, take out a fresh
+ * ID and put that in the map. */
+fn fresh_clause_variables(target: &mut Clause, curr_var_id: &mut u32) {
+    let mut assignments = HashMap::<u32, u32>::new();
+    for term in &mut target.head.terms {
+        fresh_term_variable(term, curr_var_id, &mut assignments);
+    }
+    for literal in &mut target.body {
+        match literal {
+            Literal::Predicate(pred) => {
+                for term in &mut pred.terms {
+                    fresh_term_variable(term, curr_var_id, &mut assignments);
+                }
+                for clause in &mut pred.clauses {
+                    fresh_clause_variables(clause, curr_var_id);
+                }
+            },
+            Literal::Relation(_op, expr1, expr2) => {
+                fresh_expr_variables(expr1, curr_var_id, &mut assignments);
+                fresh_expr_variables(expr2, curr_var_id, &mut assignments);
+            }
+        }
+    }
+}
+
 /* Make sure that the head of each clause comprises entirely of unique
  * variables. Do this be replacing constants and duplicate variables with fresh
  * ones, and by adding equality constraints to the body. This will simplify the
@@ -127,7 +194,7 @@ fn unique_variable_heads(target: &mut Program, curr_var_id: &mut u32) {
 /* Substitute the clauses of the source program into the predicates of the
  * target that reference them. This transformation does not inline the
  * variables. */
-fn substitute_program(target: &mut Program, source: Program) {
+fn substitute_program(target: &mut Program, source: Program, curr_var_id: &mut u32) {
     for query in &mut target.queries {
         if let Some(clauses) = source.assertions.get(&query.signature()) {
             query.clauses = clauses.clone();
@@ -138,7 +205,11 @@ fn substitute_program(target: &mut Program, source: Program) {
             for literal in &mut clause.body {
                 if let Literal::Predicate(pred) = literal {
                     if let Some(clauses) = source.assertions.get(&pred.signature()) {
-                        pred.clauses = clauses.clone();
+                        let mut clauses = clauses.clone();
+                        for clause in clauses.iter_mut() {
+                            fresh_clause_variables(clause, curr_var_id);
+                        }
+                        pred.clauses = clauses;
                     }
                 }
             }
@@ -253,18 +324,26 @@ fn flatten_program(target: &mut Program) {
     }
 }
 
+/* Substitute the given program into itself the given number of times. This
+ * function ensures that each clause instantiation receives fesh variables. */
+fn iterate_program(base_program: &Program, pow: u32) -> Program {
+    let mut curr_var_id = 0;
+    let mut current_program = base_program.clone();
+    number_program_variables(&mut current_program, &mut curr_var_id);
+
+    for _i in 1..pow {
+        let mut target_program = base_program.clone();
+        number_program_variables(&mut target_program, &mut curr_var_id);
+        substitute_program(&mut target_program, current_program, &mut curr_var_id);
+        bind_program_variables(&mut target_program, &mut curr_var_id);
+        flatten_program(&mut target_program);
+        current_program = target_program;
+    }
+    current_program
+}
+
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
-    let mut curr_var_id = 0;
     let orig_program = Program::parse(&unparsed_file).unwrap();
-    let mut current_program = orig_program.clone();
-    number_program_variables(&mut current_program, &mut curr_var_id);
-    
-    let mut target_program = orig_program.clone();
-    number_program_variables(&mut target_program, &mut curr_var_id);
-    substitute_program(&mut target_program, current_program);
-    bind_program_variables(&mut target_program, &mut curr_var_id);
-    flatten_program(&mut target_program);
-    current_program = target_program;
-    println!("{:#?}", current_program);
+    println!("{:#?}", iterate_program(&orig_program, 2));
 }
