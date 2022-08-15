@@ -9,6 +9,7 @@ pub struct VampIRParser;
 
 #[derive(Clone)]
 pub struct Program {
+    pub literals: Vec<Literal>,
     pub queries: Vec<Predicate>,
     pub assertions: HashMap<(String, usize), Vec<Clause>>,
 }
@@ -31,7 +32,7 @@ impl Program {
                         }
                     }
                 },
-                Rule::EOI => return Ok(Self { queries, assertions }),
+                Rule::EOI => return Ok(Self { literals: vec![], queries, assertions }),
                 _ => unreachable!("program should either be statement or EOI")
             }
         }
@@ -42,12 +43,15 @@ impl Program {
 impl fmt::Debug for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for query in &self.queries {
-            writeln!(f, "{:?}", query)?;
+            writeln!(f, "{:?}?", query)?;
         }
         for clauses in self.assertions.values() {
             for clause in clauses {
                 writeln!(f, "{:?}", clause)?;
             }
+        }
+        for literal in &self.literals {
+            writeln!(f, "{:?}", literal)?;
         }
         Ok(())
     }
