@@ -7,11 +7,13 @@ use std::fmt;
 #[grammar = "vamp_ir.pest"]
 pub struct VampIRParser;
 
+pub type Signature = (String, usize);
+
 #[derive(Clone)]
 pub struct Program {
     pub literals: Vec<Literal>,
     pub queries: Vec<Predicate>,
-    pub assertions: HashMap<(String, usize), Vec<Clause>>,
+    pub assertions: HashMap<Signature, Vec<Clause>>,
 }
 
 impl Program {

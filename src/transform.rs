@@ -1,5 +1,9 @@
-use std::collections::{BTreeSet, HashMap};
-use crate::ast::{Program, Literal, Term, Variable, RelOp, Expression, Clause, ArithOp, Predicate};
+use std::collections::{BTreeSet, HashMap, BTreeMap, VecDeque, HashSet};
+use petgraph::{Graph, Direction};
+use petgraph::prelude::Bfs;
+use petgraph::visit::{Visitable, GraphRef, VisitMap};
+use petgraph::algo::{tarjan_scc, is_cyclic_directed};
+use crate::ast::{Signature, Program, Literal, Term, Variable, RelOp, Expression, Clause, ArithOp, Predicate};
 
 /* If this term is a variable, then give that variable the ID corresponding to
  * its name in the map. If this is not possible, then take out a fresh variable
@@ -513,14 +517,14 @@ fn flatten_program_expressions(
 }
 
 /* Collect a variable occuring in the given term, if possible. */
-pub fn collect_term_variable(term: &Term, variables: &mut Vec<Variable>) {
+pub fn collect_term_variable(term: &Term, variables: &mut BTreeSet<Variable>) {
     if let Term::Variable(v) = term {
-        variables.push(v.clone());
+        variables.insert(v.clone());
     }
 }
 
 /* Collect all the variables occuring the given expression's terms. */
-pub fn collect_expression_variables(expr: &Expression, variables: &mut Vec<Variable>) {
+pub fn collect_expression_variables(expr: &Expression, variables: &mut BTreeSet<Variable>) {
     match expr {
         Expression::Term(t) => collect_term_variable(t, variables),
         Expression::Negate(n) => collect_expression_variables(n, variables),
@@ -531,13 +535,18 @@ pub fn collect_expression_variables(expr: &Expression, variables: &mut Vec<Varia
     }
 }
 
+/* Collect all the variables occuring in the given predicate's terms. */
+pub fn collect_predicate_variables(pred: &Predicate, variables: &mut BTreeSet<Variable>) {
+    for term in &pred.terms {
+        collect_term_variable(term, variables);
+    }
+}
+
 /* Collect all the variables occuring in the given literal's terms. */
-pub fn collect_literal_variables(literal: &Literal, variables: &mut Vec<Variable>) {
+pub fn collect_literal_variables(literal: &Literal, variables: &mut BTreeSet<Variable>) {
     match literal {
         Literal::Predicate(p) => {
-            for term in &p.terms {
-                collect_term_variable(term, variables);
-            }
+            collect_predicate_variables(p, variables);
         },
         Literal::Relation(_op, e1, e2) => {
             collect_expression_variables(e1, variables);
@@ -548,7 +557,7 @@ pub fn collect_literal_variables(literal: &Literal, variables: &mut Vec<Variable
 
 /* Collect all the variables occuring in the given clause's head and body
  * literals. */
-pub fn collect_clause_variables(clause: &Clause, variables: &mut Vec<Variable>) {
+pub fn collect_clause_variables(clause: &Clause, variables: &mut BTreeSet<Variable>) {
     for term in &clause.head.terms {
         collect_term_variable(term, variables);
     }
@@ -559,7 +568,7 @@ pub fn collect_clause_variables(clause: &Clause, variables: &mut Vec<Variable>) 
 
 /* Collect all the variables occuring in the given program's literals, clauses,
  * and queries. */
-pub fn collect_program_variables(program: &Program, variables: &mut Vec<Variable>) {
+pub fn collect_program_variables(program: &Program, variables: &mut BTreeSet<Variable>) {
     for literal in &program.literals {
         collect_literal_variables(literal, variables);
     }
@@ -572,5 +581,206 @@ pub fn collect_program_variables(program: &Program, variables: &mut Vec<Variable
         for clause in &query.clauses {
             collect_clause_variables(&clause, variables);
         }
+    }
+}
+
+/* Associates all the relations in a program with a graph node and adds an edge
+ * between two relations a, b if a clause of a contains a predicate literal
+ * referring to the relation b. */
+pub fn graph_program_relations(program: &Program) -> Graph<&(String, usize), ()> {
+    let mut clause_graph = Graph::new();
+    let mut node_map = HashMap::new();
+    for signature in program.assertions.keys() {
+        node_map.insert(signature, clause_graph.add_node(signature));
+    }
+    for (signature, clauses) in &program.assertions {
+        for clause in clauses {
+            for literal in &clause.body {
+                if let Literal::Predicate(pred) = literal {
+                    if node_map.contains_key(&pred.signature()) {
+                        clause_graph.add_edge(
+                            node_map[&signature],
+                            node_map[&pred.signature()],
+                            (),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    clause_graph
+}
+
+/* Associates all the variables in a clause with a graph node and adds an edge
+ * between two variables a, b if there is a literal of the form a = f(b) where
+ * f is some function. */
+pub fn graph_clause_variables(clause: &Clause) -> (Graph<Variable, ()>, Variable) {
+    let mut variable_graph = Graph::new();
+    let mut node_map = BTreeMap::new();
+    let constant_variable = Variable::new(u32::MAX);
+    let mut clause_variables = BTreeSet::new();
+    clause_variables.insert(constant_variable.clone());
+    collect_clause_variables(clause, &mut clause_variables);
+    for variable in clause_variables {
+        node_map.insert(variable.clone(), variable_graph.add_node(variable));
+    }
+    for literal in &clause.body {
+        if let Literal::Relation(
+            RelOp::Eq,
+            Expression::Term(Term::Variable(v)),
+            rhs,
+        ) = literal {
+            let mut expression_variables = BTreeSet::new();
+            expression_variables.insert(constant_variable.clone());
+            collect_expression_variables(rhs, &mut expression_variables);
+            for vd in expression_variables {
+                variable_graph.add_edge(
+                    node_map[&v],
+                    node_map[&vd],
+                    (),
+                );
+            }
+        }
+    }
+    (variable_graph, constant_variable)
+}
+
+/// Create a new **Bfs**, using the graph's visitor map, and put **starts**
+/// in the stack of nodes to visit.
+pub fn new_bfs<N, VM, G>(graph: G, starts: HashSet<N>) -> Bfs<N, VM>
+where
+    G: GraphRef + Visitable<NodeId = N, Map = VM>,
+    VM: VisitMap<N>,
+    N: Copy + PartialEq,
+    
+{
+    let mut discovered = graph.visit_map();
+    let mut stack = VecDeque::new();
+    for elt in starts {
+        discovered.visit(elt);
+        stack.push_front(elt);
+    }
+    Bfs { stack, discovered }
+}
+
+/* Determine whether every auxilliary variable in the program is explicitly
+ * defined. This is necessary because searching for valid variable assignments
+ * for implicitly defined variables can be too computationally expensive. */
+pub fn build_explicit_defs(program: &Program) {
+    // Analyze variable dependencies separately for each SCC of clauses. This is
+    // in order to avoid repeatedly invalidating variable dependencies within an
+    // SCC.
+    let clause_graph = graph_program_relations(program);
+    let sccs = tarjan_scc(&clause_graph);
+    let mut explicit_params = BTreeMap::<&Signature, Vec<bool>>::new();
+    for scc in sccs {
+        let mut curr_explicit_params = BTreeMap::new();
+        for node in scc {
+            let signature = clause_graph[node];
+            curr_explicit_params.insert(signature, vec![false; signature.1]);
+            let clauses = &program.assertions[signature];
+            for clause in clauses {
+                // Graph the dependencies between variables in this clause in
+                // order to determine how auxilliary variable witnesses can be
+                // derived.
+                let (variable_graph, constant) = graph_clause_variables(clause);
+                if is_cyclic_directed(&variable_graph) {
+                    panic!("cyclic explicit variable definitions found");
+                }
+
+                // To facilitate reverse variable lookups
+                let mut node_map = BTreeMap::new();
+                for ix in variable_graph.node_indices() {
+                    node_map.insert(variable_graph[ix].clone(), ix);
+                }
+
+                // Obtain head, clause, and body variable indicies from the
+                // variable graph constructed above.
+                let mut head_variables = BTreeSet::new();
+                collect_predicate_variables(&clause.head, &mut head_variables);
+                let head_variable_ixs: HashSet<_> =
+                    head_variables.into_iter().map(|n| node_map[&n]).collect();
+                let mut clause_variables = BTreeSet::new();
+                collect_clause_variables(clause, &mut clause_variables);
+                let clause_variable_ixs: HashSet<_> =
+                    clause_variables.into_iter().map(|n| node_map[&n]).collect();
+                let body_variable_ixs: HashSet<_> =
+                    clause_variable_ixs.difference(&head_variable_ixs).cloned().collect();
+
+                // Collect a set of variables such that all expressions defined
+                // in terms of them can be explicitly defined by the compiler.
+                // These variables are those either head variables or are
+                // explicitly defined by a predicate used in the body.
+                let mut valid_leafs = HashSet::new();
+                valid_leafs.extend(head_variable_ixs.clone());
+                valid_leafs.insert(node_map[&constant]);
+                for literal in &clause.body {
+                    if let Literal::Predicate(pred) = literal {
+                        if let Some(explicits) = explicit_params.get(&pred.signature()) {
+                            for (i, is_explicit) in explicits.iter().enumerate() {
+                                if *is_explicit {
+                                    if let Term::Variable(v) = &pred.terms[i] {
+                                        valid_leafs.insert(node_map[&v]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Ensure that the leafs of our variable DAG come from the set
+                // defined above.
+                for ix in variable_graph.node_indices() {
+                    match variable_graph.edges_directed(ix, Direction::Outgoing).next() {
+                        None if !valid_leafs.contains(&ix) =>
+                            panic!("all variables must be explicitly defined \
+                                    from head variables"),
+                        _ => {}
+                    }
+                }
+
+                // If there is more than one clause to this relation, then none
+                // of its parameters can be explicitly defined
+                if clauses.len() > 1 { continue }
+
+                // Determine variables depended on by body variables
+                let mut bfs = new_bfs(&variable_graph, body_variable_ixs);
+                let mut body_dependencies = HashSet::new();
+                while let Some(nx) = bfs.next(&variable_graph) {
+                    body_dependencies.insert(nx);
+                }
+                
+                // Determine the explicitly defined head variables that are not
+                // depended on by the body
+                let free_variables: HashSet<_> =
+                    head_variable_ixs.difference(&body_dependencies).cloned().collect();
+                let mut explicit_params = HashSet::new();
+                for var in free_variables {
+                    if let Some(_) =
+                        variable_graph.edges_directed(var, Direction::Outgoing).next() {
+                            explicit_params.insert(var);
+                    }
+                }
+
+                // Mark the explicit head variable positions so that future
+                // strongly connected components need not explicitly define
+                // arguments in the position corresponding to this parameter.
+                let mut explicit_variables = vec![false; signature.1];
+                for (i, term) in clause.head.terms.iter().enumerate() {
+                    match term {
+                        Term::Constant(_) => explicit_variables[i] = true,
+                        Term::Variable(v) if explicit_params.contains(&node_map[v]) => {
+                            explicit_variables[i] = true;
+                        },
+                        _ => {}
+                    }
+                }
+                curr_explicit_params.insert(signature, explicit_variables);
+            }
+        }
+        // Extending the explicit parameter map earlier could possibly
+        // invalidate the analysis that determined a given predicate's
+        // explicitness. So apply the analysis only for future SCCs.
+        explicit_params.extend(curr_explicit_params);
     }
 }

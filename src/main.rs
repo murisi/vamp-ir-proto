@@ -15,10 +15,10 @@ use plonk::error::to_pc_error;
 use plonk_core::constraint_system::StandardComposer;
 use plonk_core::error::Error;
 use std::fs;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use crate::ast::{Program, Literal, Expression, ArithOp, RelOp, Term};
-use crate::transform::{iterate_program, collect_program_variables};
+use crate::transform::{iterate_program, collect_program_variables, build_explicit_defs};
 extern crate pest;
 #[macro_use]
 extern crate pest_derive;
@@ -38,7 +38,7 @@ where
     P: TEModelParameters<BaseField = F>,
 {
     fn new(program: Program) -> PlonkProgram<F, P> {
-        let mut variables = vec![];
+        let mut variables = BTreeSet::new();
         collect_program_variables(&program, &mut variables);
         let mut variable_map = BTreeMap::new();
         for variable in variables {
@@ -390,6 +390,7 @@ where
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
     let orig_program = Program::parse(&unparsed_file).unwrap();
+    build_explicit_defs(&orig_program);
     let compiled_program = iterate_program(&orig_program, 3);
     println!("{:#?}", compiled_program);
     // Generate CRS
