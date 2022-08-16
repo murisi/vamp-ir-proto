@@ -18,7 +18,7 @@ use std::fs;
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use crate::ast::{Program, Literal, Expression, ArithOp, RelOp, Term};
-use crate::transform::{iterate_program, collect_program_variables, build_explicit_defs};
+use crate::transform::{iterate_program, collect_program_variables};
 extern crate pest;
 #[macro_use]
 extern crate pest_derive;
@@ -390,7 +390,6 @@ where
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
     let orig_program = Program::parse(&unparsed_file).unwrap();
-    build_explicit_defs(&orig_program);
     let compiled_program = iterate_program(&orig_program, 3);
     println!("{:#?}", compiled_program);
     // Generate CRS

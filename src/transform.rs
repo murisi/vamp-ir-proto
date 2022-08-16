@@ -369,8 +369,9 @@ fn bottom_out_recursion(target: &mut Program) {
 pub fn iterate_program(base_program: &Program, pow: u32) -> Program {
     let mut curr_var_id = 0;
     let mut current_program = base_program.clone();
-    bottom_out_recursion(&mut current_program);
     number_program_variables(&mut current_program, &mut curr_var_id);
+    build_explicit_defs(&current_program);
+    bottom_out_recursion(&mut current_program);
 
     for _i in 1..pow {
         let mut target_program = base_program.clone();
