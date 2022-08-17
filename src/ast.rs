@@ -1,6 +1,6 @@
 use pest::Parser;
 use pest::iterators::Pair;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::fmt;
 
 #[derive(Parser)]
@@ -11,9 +11,10 @@ pub type Signature = (String, usize);
 
 #[derive(Clone)]
 pub struct Program {
-    pub literals: Vec<Literal>,
+    pub body: Vec<Literal>,
     pub queries: Vec<Predicate>,
     pub assertions: HashMap<Signature, Vec<Clause>>,
+    pub definitions: BTreeMap<Variable, Expression>,
 }
 
 impl Program {
@@ -34,7 +35,12 @@ impl Program {
                         }
                     }
                 },
-                Rule::EOI => return Ok(Self { literals: vec![], queries, assertions }),
+                Rule::EOI => return Ok(Self {
+                    body: vec![],
+                    definitions: BTreeMap::new(),
+                    queries,
+                    assertions
+                }),
                 _ => unreachable!("program should either be statement or EOI")
             }
         }
@@ -52,7 +58,7 @@ impl fmt::Debug for Program {
                 writeln!(f, "{:?}", clause)?;
             }
         }
-        for literal in &self.literals {
+        for literal in &self.body {
             writeln!(f, "{:?}", literal)?;
         }
         Ok(())
@@ -92,6 +98,8 @@ impl Statement {
 pub struct Clause {
     pub head: Predicate,
     pub body: Vec<Literal>,
+    pub definitions: BTreeMap<Variable, Expression>,
+    pub explicits: Vec<bool>,
 }
 
 impl Clause {
@@ -108,6 +116,8 @@ impl Clause {
             } else {
                 vec![]
             },
+            definitions: BTreeMap::new(),
+            explicits: vec![],
         })
     }
 }

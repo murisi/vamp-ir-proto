@@ -94,22 +94,32 @@ fn number_program_variables(target: &mut Program, curr_var_id: &mut u32) {
     }
 }
 
+/* Give the given variable an ID corresponding to its ID in the map. If this is
+ * not possible, then take out a fresh variable ID and assign that instead. */
+fn fresh_variable(
+    var: &mut Variable,
+    curr_var_id: &mut u32,
+    assignments: &mut HashMap<u32, u32>,
+) {
+    if let Some(id) = assignments.get(&var.id) {
+        var.id = *id;
+    } else {
+        assignments.insert(var.id, *curr_var_id);
+        var.id = *curr_var_id;
+        *curr_var_id += 1;
+    }
+}
+
 /* If this term is a variable, then give that variable the ID corresponding to
  * its ID in the map. If this is not possible, then take out a fresh variable
  * ID and assign that instead. */
 fn fresh_term_variable(
     term: &mut Term,
     curr_var_id: &mut u32,
-    assignments: &mut HashMap<u32, u32>
+    assignments: &mut HashMap<u32, u32>,
 ) {
     if let Term::Variable(var) = term {
-        if let Some(id) = assignments.get(&var.id) {
-            var.id = *id;
-        } else {
-            assignments.insert(var.id, *curr_var_id);
-            var.id = *curr_var_id;
-            *curr_var_id += 1;
-        }
+        fresh_variable(var, curr_var_id, assignments);
     }
 }
 
@@ -159,6 +169,13 @@ fn fresh_clause_variables(target: &mut Clause, curr_var_id: &mut u32) {
             }
         }
     }
+    let mut new_definitions = BTreeMap::<Variable, Expression>::new();
+    for (mut var, mut expr) in target.definitions.clone() {
+        fresh_variable(&mut var, curr_var_id, &mut assignments);
+        fresh_expr_variables(&mut expr, curr_var_id, &mut assignments);
+        new_definitions.insert(var, expr);
+    }
+    target.definitions = new_definitions;
 }
 
 /* Make sure that the head of each clause comprises entirely of unique
@@ -261,7 +278,8 @@ fn equality_or_sat(expr1: Expression, expr2: Expression, else_expr: Expression) 
 fn bind_predicate_variables(
     pred: &Predicate,
     constraints: &mut Vec<Literal>,
-    curr_var_id: &mut u32
+    definitions: &mut BTreeMap<Variable, Expression>,
+    curr_var_id: &mut u32,
 ) -> bool {
     if pred.clauses.is_empty() { return false }
     let select_line =
@@ -279,12 +297,21 @@ fn bind_predicate_variables(
             .zip(pred.terms.iter().cloned());
         /* If the prover selects this clause, then force each parameter
          * to equal the corresponding head parameter. */
-        for (term1, term2) in assignments {
+        for (i, (term1, term2)) in assignments.enumerate() {
             constraints.push(equality_or_sat(
-                Expression::Term(term1),
-                Expression::Term(term2),
+                Expression::Term(term1.clone()),
+                Expression::Term(term2.clone()),
                 multiplexer.clone(),
             ));
+            if clause.explicits[i] {
+                if let Term::Variable(v) = term2 {
+                    definitions.insert(v, Expression::Term(term1));
+                }
+            } else {
+                if let Term::Variable(v) = term1 {
+                    definitions.insert(v, Expression::Term(term2));
+                }
+            }
         }
     }
     true
@@ -297,7 +324,12 @@ fn bind_clause_variables(clause: &mut Clause, curr_var_id: &mut u32) -> bool {
     let mut clause_constraints = vec![];
     for literal in &clause.body {
         if let Literal::Predicate(pred) = literal {
-            if !bind_predicate_variables(pred, &mut clause_constraints, curr_var_id) {
+            if !bind_predicate_variables(
+                pred,
+                &mut clause_constraints,
+                &mut clause.definitions,
+                curr_var_id
+            ) {
                 return false;
             }
         }
@@ -311,12 +343,18 @@ fn bind_clause_variables(clause: &mut Clause, curr_var_id: &mut u32) -> bool {
  * possible unification. */
 fn bind_program_variables(target: &mut Program, curr_var_id: &mut u32) {
     for query in &target.queries {
-        if bind_predicate_variables(query, &mut target.literals, curr_var_id) {
+        if bind_predicate_variables(
+            query,
+            &mut target.body,
+            &mut target.definitions,
+            curr_var_id
+        ) {
             for clause in &query.clauses {
-                target.literals.extend_from_slice(&clause.body);
+                target.body.extend_from_slice(&clause.body);
+                target.definitions.extend(clause.definitions.clone());
             }
         } else {
-            target.literals.push(Literal::Predicate(query.clone()));
+            target.body.push(Literal::Predicate(query.clone()));
         }
     }
     for clauses in target.assertions.values_mut() {
@@ -334,8 +372,9 @@ fn flatten_program_predicates(target: &mut Program) {
             for literal in clause.body.drain(..) {
                 match literal {
                     Literal::Predicate(p) => {
-                        for mut clause in p.clauses {
-                            new_body.append(&mut clause.body);
+                        for mut iclause in p.clauses {
+                            new_body.append(&mut iclause.body);
+                            clause.definitions.extend(iclause.definitions.clone());
                         }
                     },
                     rel @ Literal::Relation(_, _, _) => {
@@ -368,14 +407,18 @@ fn bottom_out_recursion(target: &mut Program) {
  * function ensures that each clause instantiation receives fesh variables. */
 pub fn iterate_program(base_program: &Program, pow: u32) -> Program {
     let mut curr_var_id = 0;
+    let mut base_program = base_program.clone();
+    number_program_variables(&mut base_program, &mut curr_var_id);
+    build_explicit_defs(&mut base_program);
+    record_explicit_definitions(&mut base_program);
+    
     let mut current_program = base_program.clone();
-    number_program_variables(&mut current_program, &mut curr_var_id);
-    build_explicit_defs(&current_program);
     bottom_out_recursion(&mut current_program);
 
     for _i in 1..pow {
         let mut target_program = base_program.clone();
         number_program_variables(&mut target_program, &mut curr_var_id);
+        record_explicit_definitions(&mut target_program);
         substitute_program(&mut target_program, current_program, &mut curr_var_id);
         bind_program_variables(&mut target_program, &mut curr_var_id);
         flatten_program_predicates(&mut target_program);
@@ -394,38 +437,45 @@ pub fn iterate_program(base_program: &Program, pow: u32) -> Program {
 fn flatten_expression(
     expr: &Expression,
     literals: &mut Vec<Literal>,
+    definitions: &mut BTreeMap<Variable, Expression>,
     curr_var_id: &mut u32,
 ) -> Term {
     match expr {
         Expression::Term(t) => t.clone(),
         Expression::Negate(n) => {
-            let inner = flatten_expression(n, literals, curr_var_id);
-            let new_var = Term::Variable(Variable::new(*curr_var_id));
+            let inner = flatten_expression(n, literals, definitions, curr_var_id);
+            let new_var = Variable::new(*curr_var_id);
             *curr_var_id += 1;
+            let lhs = Term::Variable(new_var.clone());
+            let rhs = Expression::Negate(Box::new(Expression::Term(inner)));
+            definitions.insert(new_var, rhs.clone());
             let new_term = Literal::Relation(
                 RelOp::Eq,
-                Expression::Term(new_var.clone()),
-                Expression::Negate(Box::new(Expression::Term(inner)))
+                Expression::Term(lhs.clone()),
+                rhs,
             );
             literals.push(new_term);
-            new_var
+            lhs
         },
         Expression::Binary(op, e1, e2) => {
-            let inner1 = flatten_expression(e1, literals, curr_var_id);
-            let inner2 = flatten_expression(e2, literals, curr_var_id);
-            let new_var = Term::Variable(Variable::new(*curr_var_id));
+            let inner1 = flatten_expression(e1, literals, definitions, curr_var_id);
+            let inner2 = flatten_expression(e2, literals, definitions, curr_var_id);
+            let new_var = Variable::new(*curr_var_id);
             *curr_var_id += 1;
+            let lhs = Term::Variable(new_var.clone());
+            let rhs = Expression::Binary(
+                op.clone(),
+                Box::new(Expression::Term(inner1)),
+                Box::new(Expression::Term(inner2)),
+            );
+            definitions.insert(new_var, rhs.clone());
             let new_term = Literal::Relation(
                 RelOp::Eq,
-                Expression::Term(new_var.clone()),
-                Expression::Binary(
-                    op.clone(),
-                    Box::new(Expression::Term(inner1)),
-                    Box::new(Expression::Term(inner2)),
-                )
+                Expression::Term(lhs.clone()),
+                rhs,
             );
             literals.push(new_term);
-            new_var
+            lhs
         }
     }
 }
@@ -435,6 +485,7 @@ fn flatten_expression(
 fn flatten_literal_expressions(
     literal: Literal,
     literals: &mut Vec<Literal>,
+    definitions: &mut BTreeMap<Variable, Expression>,
     curr_var_id: &mut u32,
 ) -> Literal {
     match literal.clone() {
@@ -467,6 +518,7 @@ fn flatten_literal_expressions(
                     Box::new(e2.clone()),
                 ),
                 literals,
+                definitions,
                 curr_var_id
             );
             Literal::Relation(
@@ -489,6 +541,7 @@ fn flatten_clause_expressions(
         *literal = flatten_literal_expressions(
             literal.clone(),
             &mut expr_literals,
+            &mut clause.definitions,
             curr_var_id,
         );
     }
@@ -502,14 +555,15 @@ fn flatten_program_expressions(
     curr_var_id: &mut u32,
 ) {
     let mut expr_literals = Vec::new();
-    for literal in &mut program.literals {
+    for literal in &mut program.body {
         *literal = flatten_literal_expressions(
             literal.clone(),
             &mut expr_literals,
+            &mut program.definitions,
             curr_var_id
         );
     }
-    program.literals.append(&mut expr_literals);
+    program.body.append(&mut expr_literals);
     for clauses in program.assertions.values_mut() {
         for clause in clauses {
             flatten_clause_expressions(clause, curr_var_id);
@@ -570,7 +624,7 @@ pub fn collect_clause_variables(clause: &Clause, variables: &mut BTreeSet<Variab
 /* Collect all the variables occuring in the given program's literals, clauses,
  * and queries. */
 pub fn collect_program_variables(program: &Program, variables: &mut BTreeSet<Variable>) {
-    for literal in &program.literals {
+    for literal in &program.body {
         collect_literal_variables(literal, variables);
     }
     for clauses in program.assertions.values() {
@@ -588,11 +642,11 @@ pub fn collect_program_variables(program: &Program, variables: &mut BTreeSet<Var
 /* Associates all the relations in a program with a graph node and adds an edge
  * between two relations a, b if a clause of a contains a predicate literal
  * referring to the relation b. */
-pub fn graph_program_relations(program: &Program) -> Graph<&(String, usize), ()> {
+pub fn graph_program_relations(program: &Program) -> Graph<(String, usize), ()> {
     let mut clause_graph = Graph::new();
     let mut node_map = HashMap::new();
     for signature in program.assertions.keys() {
-        node_map.insert(signature, clause_graph.add_node(signature));
+        node_map.insert(signature, clause_graph.add_node(signature.clone()));
     }
     for (signature, clauses) in &program.assertions {
         for clause in clauses {
@@ -667,20 +721,21 @@ where
 /* Determine whether every auxilliary variable in the program is explicitly
  * defined. This is necessary because searching for valid variable assignments
  * for implicitly defined variables can be too computationally expensive. */
-pub fn build_explicit_defs(program: &Program) {
+pub fn build_explicit_defs(program: &mut Program) {
     // Analyze variable dependencies separately for each SCC of clauses. This is
     // in order to avoid repeatedly invalidating variable dependencies within an
     // SCC.
     let clause_graph = graph_program_relations(program);
     let sccs = tarjan_scc(&clause_graph);
-    let mut explicit_params = BTreeMap::<&Signature, Vec<bool>>::new();
+    let mut explicit_params = BTreeMap::<Signature, Vec<bool>>::new();
     for scc in sccs {
         let mut curr_explicit_params = BTreeMap::new();
         for node in scc {
-            let signature = clause_graph[node];
-            curr_explicit_params.insert(signature, vec![false; signature.1]);
-            let clauses = &program.assertions[signature];
-            for clause in clauses {
+            let signature = clause_graph[node].clone();
+            curr_explicit_params.insert(signature.clone(), vec![false; signature.1]);
+            let clauses = program.assertions.get_mut(&signature).unwrap();
+            let clauses_len = clauses.len();
+            for clause in clauses.iter_mut() {
                 // Graph the dependencies between variables in this clause in
                 // order to determine how auxilliary variable witnesses can be
                 // derived.
@@ -742,7 +797,10 @@ pub fn build_explicit_defs(program: &Program) {
 
                 // If there is more than one clause to this relation, then none
                 // of its parameters can be explicitly defined
-                if clauses.len() > 1 { continue }
+                if clauses_len > 1 {
+                    clause.explicits = vec![false; signature.1];
+                    continue;
+                }
 
                 // Determine variables depended on by body variables
                 let mut bfs = new_bfs(&variable_graph, body_variable_ixs);
@@ -776,12 +834,30 @@ pub fn build_explicit_defs(program: &Program) {
                         _ => {}
                     }
                 }
-                curr_explicit_params.insert(signature, explicit_variables);
+                curr_explicit_params.insert(signature.clone(), explicit_variables.clone());
+                clause.explicits = explicit_variables;
             }
         }
         // Extending the explicit parameter map earlier could possibly
         // invalidate the analysis that determined a given predicate's
         // explicitness. So apply the analysis only for future SCCs.
         explicit_params.extend(curr_explicit_params);
+    }
+}
+
+/* Record all of the definitions occuring in the program's clauses. */
+fn record_explicit_definitions(program: &mut Program) {
+    for clauses in program.assertions.values_mut() {
+        for clause in clauses {
+            for literal in &clause.body {
+                if let Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Variable(v)),
+                    rhs,
+                ) = literal {
+                    clause.definitions.insert(v.clone(), rhs.clone());
+                }
+            }
+        }
     }
 }

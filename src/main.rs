@@ -71,7 +71,7 @@ where
             inputs.insert(var, composer.add_input(*field_elt));
         }
         let zero = composer.zero_var();
-        for literal in &self.program.literals {
+        for literal in &self.program.body {
             match literal.clone() {
                 Literal::Predicate(_) =>
                     panic!("compilation should leave no predicates"),
@@ -387,11 +387,41 @@ where
     }
 }
 
+/* Evaluate the given expression sourcing any variables from the given map. */
+fn evaluate_expr(expr: &Expression, defs: &mut BTreeMap<ast::Variable, Expression>) -> i32 {
+    match expr {
+        Expression::Term(Term::Constant(c)) => *c,
+        Expression::Term(Term::Variable(v)) => {
+            let val = evaluate_expr(&defs[v].clone(), defs);
+            defs.insert(v.clone(), Expression::Term(Term::Constant(val)));
+            val
+        },
+        Expression::Negate(e) => -evaluate_expr(e, defs),
+        Expression::Binary(ArithOp::Plus, a, b) =>
+            evaluate_expr(&a, defs) +
+            evaluate_expr(&b, defs),
+        Expression::Binary(ArithOp::Minus, a, b) =>
+            evaluate_expr(&a, defs) -
+            evaluate_expr(&b, defs),
+        Expression::Binary(ArithOp::Times, a, b) =>
+            evaluate_expr(&a, defs) *
+            evaluate_expr(&b, defs),
+        Expression::Binary(ArithOp::Divide, a, b) =>
+            evaluate_expr(&a, defs) /
+            evaluate_expr(&b, defs),
+    }
+}
+
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
     let orig_program = Program::parse(&unparsed_file).unwrap();
-    let compiled_program = iterate_program(&orig_program, 3);
+    let compiled_program = iterate_program(&orig_program, 4);
     println!("{:#?}", compiled_program);
+    println!("{:#?}", compiled_program.definitions);
+    /*for (var, expr) in &compiled_program.definitions {
+        let val = evaluate_expr(&expr, &mut compiled_program.definitions.clone());
+        println!("{:?} {:?}", var, val);
+    }*/
     // Generate CRS
     type PC = SonicKZG10<Bls12_381, DensePolynomial<BlsScalar>>;
     let pp = PC::setup(1 << 10, None, &mut OsRng)
