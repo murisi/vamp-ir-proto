@@ -379,8 +379,8 @@ impl Expression {
             Rule::expression => Self::parse(pair),
             Rule::negate => {
                 let pair =
-                    pairs.next().expect("negation operator should be followed by expression");
-                Expression::parse(pair).map(|x| Expression::Negate(Box::new(x)))
+                    pairs.next().expect("negation operator should be followed by value");
+                Self::parse_value(pair).map(|x| Expression::Negate(Box::new(x)))
             },
             _ => unreachable!("value should either be negation, term, or expression"),
         }
