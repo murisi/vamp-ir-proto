@@ -69,9 +69,17 @@ where
         let mut definitions = self.program.definitions.clone();
         // Hard-code constant definitions for choice points and variable
         // assignments
+        let mut remaining_choices: BTreeSet<_> =
+            self.program.choice_points.values().collect();
         for (path, choice) in &choice_points {
             let choice_var = self.program.choice_points[path].clone();
+            remaining_choices.remove(&choice_var);
             definitions.insert(choice_var, Expression::Term(Term::Constant(*choice)));
+        }
+        // Set the remaining choices to arbitrary values since they will be
+        // cancelled out in computations
+        for choice_var in remaining_choices {
+            definitions.insert(choice_var.clone(), Expression::Term(Term::Constant(0)));
         }
         for (var, value) in &var_assignments {
             definitions.insert(var.clone(), Expression::Term(Term::Constant(*value)));
