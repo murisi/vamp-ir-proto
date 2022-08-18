@@ -15,6 +15,7 @@ pub struct Program {
     pub queries: Vec<Predicate>,
     pub assertions: HashMap<Signature, Vec<Clause>>,
     pub definitions: BTreeMap<Variable, Expression>,
+    pub choice_points: HashMap<Vec<usize>, Variable>,
 }
 
 impl Program {
@@ -38,6 +39,7 @@ impl Program {
                 Rule::EOI => return Ok(Self {
                     body: vec![],
                     definitions: BTreeMap::new(),
+                    choice_points: HashMap::new(),
                     queries,
                     assertions
                 }),
@@ -100,6 +102,7 @@ pub struct Clause {
     pub body: Vec<Literal>,
     pub definitions: BTreeMap<Variable, Expression>,
     pub explicits: Vec<bool>,
+    pub choice_points: HashMap<Vec<usize>, Variable>,
 }
 
 impl Clause {
@@ -118,6 +121,7 @@ impl Clause {
             },
             definitions: BTreeMap::new(),
             explicits: vec![],
+            choice_points: HashMap::new(),
         })
     }
 }

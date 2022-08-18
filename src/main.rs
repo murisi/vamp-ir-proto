@@ -17,7 +17,8 @@ use plonk_core::error::Error;
 use std::fs;
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
-use crate::ast::{Program, Literal, Expression, ArithOp, RelOp, Term};
+use crate::ast::{Program, Literal, Expression, ArithOp, RelOp, Term, Predicate, Clause};
+use std::io::Write;
 use crate::transform::{iterate_program, collect_program_variables};
 extern crate pest;
 #[macro_use]
@@ -383,7 +384,7 @@ where
     }
 
     fn padded_circuit_size(&self) -> usize {
-        1 << 9
+        1 << 10
     }
 }
 
@@ -412,22 +413,155 @@ fn evaluate_expr(expr: &Expression, defs: &mut BTreeMap<ast::Variable, Expressio
     }
 }
 
+/* Run the given expression in the context of the supplied variable mappings. */
+fn run_expr(expr: &Expression, bindings: &mut BTreeMap<ast::Variable, i32>) -> i32 {
+    match expr {
+        Expression::Term(Term::Constant(c)) => *c,
+        Expression::Term(Term::Variable(v)) => bindings[v],
+        Expression::Negate(e) => -run_expr(e, bindings),
+        Expression::Binary(ArithOp::Plus, a, b) =>
+            run_expr(&a, bindings) +
+            run_expr(&b, bindings),
+        Expression::Binary(ArithOp::Minus, a, b) =>
+            run_expr(&a, bindings) -
+            run_expr(&b, bindings),
+        Expression::Binary(ArithOp::Times, a, b) =>
+            run_expr(&a, bindings) *
+            run_expr(&b, bindings),
+        Expression::Binary(ArithOp::Divide, a, b) =>
+            run_expr(&a, bindings) /
+            run_expr(&b, bindings),
+    }
+}
+
+/* Run the clause (with head variables substituted in from the supplied map) in
+ * the context of the given program. */
+fn run_clause(
+    clause: &Clause,
+    program: &Program,
+    bindings: &mut BTreeMap<ast::Variable, i32>
+) -> Result<(), Literal> {
+    for literal in &clause.body {
+        match literal {
+            // Treat equalities with a variable on the LHS as a definition and
+            // update the bindings accordingly
+            Literal::Relation(
+                RelOp::Eq,
+                Expression::Term(Term::Variable(v)),
+                rhs
+            ) => {
+                let rhs_val = run_expr(rhs, bindings);
+                match bindings.get(v) {
+                    Some(lhs_val) if *lhs_val == rhs_val => {},
+                    Some(_lhs_val) => return Err(literal.clone()),
+                    None => { bindings.insert(v.clone(), rhs_val); },
+                }
+            },
+            // Otherwise just check the given constraints
+            Literal::Relation(RelOp::Eq, lhs, rhs) => {
+                if run_expr(lhs, bindings) != run_expr(rhs, bindings) {
+                    return Err(literal.clone())
+                }
+            },
+            Literal::Relation(RelOp::Ne, lhs, rhs) => {
+                if run_expr(lhs, bindings) == run_expr(rhs, bindings) {
+                    return Err(literal.clone())
+                }
+            },
+            Literal::Predicate(pred) => {
+                run_query(pred, program, bindings)?
+            }
+        }
+    }
+    Ok(())
+}
+
+/* Attempts to assign term2 to term1, modifying rbindings as necessary. Returns
+ * false if the two terms do not unify. */
+fn unify_terms(
+    term1: &Term,
+    rbindings: &mut BTreeMap<ast::Variable, i32>,
+    term2: &Term,
+    cbindings: &BTreeMap<ast::Variable, i32>
+) -> bool {
+    match (term1, term2) {
+        (Term::Constant(c1), Term::Constant(c2))
+            if c1 != c2 => return false,
+        (Term::Constant(c1), Term::Variable(v2))
+            if *c1 != cbindings[v2] => return false,
+        (Term::Variable(v1), Term::Variable(v2))
+            if !rbindings.contains_key(&v1) => {
+                rbindings.insert(v1.clone(), cbindings[v2]);
+            },
+        (Term::Variable(v1), Term::Variable(v2))
+            if rbindings.get(&v1) != Some(&cbindings[v2]) => return false,
+        (Term::Variable(v1), Term::Constant(c2))
+            if !rbindings.contains_key(&v1) => {
+                rbindings.insert(v1.clone(), *c2);
+            },
+        (Term::Variable(v1), Term::Constant(c2))
+            if rbindings.get(&v1) != Some(&c2) => return false,
+        _ => return true,
+    }
+    true
+}
+
+/* Runs the given predicate (with non-explicit variables substituted in from the
+ * map) against the program and updates the binding map with the computed
+ * explicit variables. */
+fn run_query(
+    query: &Predicate,
+    program: &Program,
+    bindings: &mut BTreeMap<ast::Variable, i32>
+) -> Result<(), Literal> {
+    // Search for a clause that proves the given predicate
+    'search: for clause in &program.assertions[&query.signature()] {
+        // Bind the implicit variables to current clause head
+        let mut cbindings = BTreeMap::new();
+        let arg_params = query.terms.iter().zip(clause.head.terms.iter());
+        for (i, (term1, term2)) in arg_params.enumerate() {
+            if !clause.explicits[i] &&
+                !unify_terms(term2, &mut cbindings, term1, bindings) {
+                    continue 'search
+            }
+        }
+        // Attempt to run the clause
+        if let Err(_) = run_clause(clause, program, &mut cbindings) {
+            continue 'search
+        }
+        // Bind the explicit variables from the current clause head
+        let mut rbindings = bindings.clone();
+        let arg_params = query.terms.iter().zip(clause.head.terms.iter());
+        for (i, (term1, term2)) in arg_params.enumerate() {
+            if clause.explicits[i] &&
+                !unify_terms(term1, &mut rbindings, term2, &cbindings) {
+                    continue 'search
+            }
+        }
+        *bindings = rbindings;
+        return Ok(())
+    }
+    Err(Literal::Predicate(query.clone()))
+}
+
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
     let orig_program = Program::parse(&unparsed_file).unwrap();
-    let compiled_program = iterate_program(&orig_program, 4);
+    let (annotated_program, compiled_program) = iterate_program(&orig_program, 4);
     println!("{:#?}", compiled_program);
     println!("{:#?}", compiled_program.definitions);
+    println!("{:?}", compiled_program.choice_points);
+
     /*for (var, expr) in &compiled_program.definitions {
         let val = evaluate_expr(&expr, &mut compiled_program.definitions.clone());
         println!("{:?} {:?}", var, val);
-    }*/
+}*/
     // Generate CRS
     type PC = SonicKZG10<Bls12_381, DensePolynomial<BlsScalar>>;
     let pp = PC::setup(1 << 10, None, &mut OsRng)
         .map_err(to_pc_error::<BlsScalar, PC>)
         .expect("unable to setup polynomial commitment scheme public parameters");
-    let mut circuit = PlonkProgram::<BlsScalar, JubJubParameters>::new(compiled_program);
+    let mut circuit = PlonkProgram::<BlsScalar, JubJubParameters>::new(compiled_program.clone());
     // Compile the circuit
     let (pk_p, vk) = circuit.compile::<PC>(&pp).expect("unable to compile circuit");
 
@@ -435,5 +569,23 @@ fn main() {
     let generator: GroupAffine<JubJubParameters> = GroupAffine::new(x, y);
     let point_f_pi: GroupAffine<JubJubParameters> =
         AffineCurve::mul(&generator, JubJubScalar::from(2u64).into_repr())
-            .into_affine();
+        .into_affine();
+
+    for query in &orig_program.queries {
+        println!("Query: {:?}", query);
+        let mut bindings = BTreeMap::new();
+        for term in &query.terms {
+            if let Term::Variable(v) = term {
+                print!("{:?}: ", v);
+                std::io::stdout().flush().expect("flush failed!");
+                let mut input_line = String::new();
+                std::io::stdin()
+                    .read_line(&mut input_line)
+                    .expect("failed to read input");
+                let x: i32 = input_line.trim().parse().expect("input not an integer");
+                bindings.insert(v.clone(), x);
+            }
+        }
+        run_query(query, &annotated_program, &mut bindings).unwrap();
+    }
 }

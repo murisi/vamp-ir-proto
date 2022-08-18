@@ -176,6 +176,9 @@ fn fresh_clause_variables(target: &mut Clause, curr_var_id: &mut u32) {
         new_definitions.insert(var, expr);
     }
     target.definitions = new_definitions;
+    for var in &mut target.choice_points.values_mut() {
+        fresh_variable(var, curr_var_id, &mut assignments);
+    }
 }
 
 /* Make sure that the head of each clause comprises entirely of unique
@@ -276,18 +279,19 @@ fn equality_or_sat(expr1: Expression, expr2: Expression, else_expr: Expression) 
  * the clauses of the relation it refers to. Return false only if this predicate
  * has no possible unification. */
 fn bind_predicate_variables(
-    pred: &Predicate,
+    pred: &mut Predicate,
     constraints: &mut Vec<Literal>,
     definitions: &mut BTreeMap<Variable, Expression>,
     curr_var_id: &mut u32,
-) -> bool {
-    if pred.clauses.is_empty() { return false }
-    let select_line =
-        Expression::Term(Term::Variable(Variable::new(*curr_var_id)));
+) -> Option<Variable> {
+    if pred.clauses.is_empty() { return None }
+    let clause_count = pred.clauses.len();
+    let select_var = Variable::new(*curr_var_id);
+    let select_line = Expression::Term(Term::Variable(select_var.clone()));
     *curr_var_id += 1;
-    for (idx, clause) in pred.clauses.iter().enumerate() {
+    for (idx, clause) in pred.clauses.iter_mut().enumerate() {
         let multiplexer =
-            build_multiplexer(select_line.clone(), idx, pred.clauses.len());
+            build_multiplexer(select_line.clone(), idx, clause_count);
         
         let assignments = clause
             .head
@@ -313,8 +317,21 @@ fn bind_predicate_variables(
                 }
             }
         }
+        for literal in &mut clause.body {
+            match literal {
+                Literal::Relation(RelOp::Eq, e1, e2) => {
+                    *literal = equality_or_sat(
+                        e1.clone(),
+                        e2.clone(),
+                        multiplexer.clone(),
+                    );
+                },
+                _ => panic!("expected inlinee to only have equalities"),
+            }
+            
+        }
     }
-    true
+    Some(select_var)
 }
 
 /* Force each predicate literal in the clause to unify with at least one of the
@@ -322,14 +339,16 @@ fn bind_predicate_variables(
  * literal within the clause has no possible unification. */
 fn bind_clause_variables(clause: &mut Clause, curr_var_id: &mut u32) -> bool {
     let mut clause_constraints = vec![];
-    for literal in &clause.body {
-        if let Literal::Predicate(pred) = literal {
-            if !bind_predicate_variables(
+    for (literal_pos, literal) in clause.body.iter_mut().enumerate() {
+        if let Literal::Predicate(ref mut pred) = literal {
+            if let Some(select_var) = bind_predicate_variables(
                 pred,
                 &mut clause_constraints,
                 &mut clause.definitions,
                 curr_var_id
             ) {
+                clause.choice_points.insert(vec![literal_pos], select_var);
+            } else {
                 return false;
             }
         }
@@ -342,16 +361,21 @@ fn bind_clause_variables(clause: &mut Clause, curr_var_id: &mut u32) -> bool {
  * their corresponding clause heads. Delete clauses that have literals with no
  * possible unification. */
 fn bind_program_variables(target: &mut Program, curr_var_id: &mut u32) {
-    for query in &target.queries {
-        if bind_predicate_variables(
+    for (query_pos, query) in target.queries.iter_mut().enumerate() {
+        if let Some(select_var) = bind_predicate_variables(
             query,
             &mut target.body,
             &mut target.definitions,
             curr_var_id
         ) {
+            target.choice_points.insert(vec![query_pos], select_var);
             for clause in &query.clauses {
                 target.body.extend_from_slice(&clause.body);
                 target.definitions.extend(clause.definitions.clone());
+                for (mut path, select_var) in clause.choice_points.clone() {
+                    path.insert(0, query_pos);
+                    target.choice_points.insert(path, select_var);
+                }
             }
         } else {
             target.body.push(Literal::Predicate(query.clone()));
@@ -369,12 +393,16 @@ fn flatten_program_predicates(target: &mut Program) {
     for clauses in target.assertions.values_mut() {
         for clause in clauses {
             let mut new_body = vec![];
-            for literal in clause.body.drain(..) {
+            for (literal_pos, literal) in clause.body.drain(..).enumerate() {
                 match literal {
                     Literal::Predicate(p) => {
                         for mut iclause in p.clauses {
                             new_body.append(&mut iclause.body);
                             clause.definitions.extend(iclause.definitions.clone());
+                            for (mut path, select_var) in iclause.choice_points.clone() {
+                                path.insert(0, literal_pos);
+                                target.choice_points.insert(path, select_var);
+                            }
                         }
                     },
                     rel @ Literal::Relation(_, _, _) => {
@@ -405,7 +433,7 @@ fn bottom_out_recursion(target: &mut Program) {
 
 /* Substitute the given program into itself the given number of times. This
  * function ensures that each clause instantiation receives fesh variables. */
-pub fn iterate_program(base_program: &Program, pow: u32) -> Program {
+pub fn iterate_program(base_program: &Program, pow: u32) -> (Program, Program) {
     let mut curr_var_id = 0;
     let mut base_program = base_program.clone();
     number_program_variables(&mut base_program, &mut curr_var_id);
@@ -426,9 +454,9 @@ pub fn iterate_program(base_program: &Program, pow: u32) -> Program {
         current_program = target_program;
     }
 
-    current_program.queries.clear();
+    //current_program.queries.clear();
     current_program.assertions.clear();
-    current_program
+    (base_program, current_program)
 }
 
 /* Flatten the given expression down to a single term and place the definitions
