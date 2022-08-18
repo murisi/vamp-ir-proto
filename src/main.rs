@@ -15,14 +15,24 @@ use plonk::error::to_pc_error;
 use plonk_core::constraint_system::StandardComposer;
 use plonk_core::error::Error;
 use std::fs;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::marker::PhantomData;
 use crate::ast::{Program, Literal, Expression, ArithOp, RelOp, Term, Predicate, Clause};
 use std::io::Write;
+use plonk_core::prelude::VerifierData;
 use crate::transform::{iterate_program, collect_program_variables};
 extern crate pest;
 #[macro_use]
 extern crate pest_derive;
+
+// Make field elements from signed values
+fn make_constant<F: PrimeField>(c: i32) -> F {
+    if c >= 0 {
+        F::from(c as u32)
+    } else {
+        -F::from((-c) as u32)
+    }
+}
 
 struct PlonkProgram<F, P>
 where
@@ -60,13 +70,6 @@ where
         &mut self,
         composer: &mut StandardComposer<F, P>,
     ) -> Result<(), Error> {
-        let make_constant = |c: i32| -> F {
-            if c >= 0 {
-                F::from(c as u32)
-            } else {
-                -F::from((-c) as u32)
-            }
-        };
         let mut inputs = BTreeMap::new();
         for (var, field_elt) in &self.variable_map {
             inputs.insert(var, composer.add_input(*field_elt));
@@ -261,10 +264,12 @@ where
                     Expression::Term(Term::Constant(c2)),
                     Expression::Term(Term::Constant(c3)),
                 ) if {
+                    let op1: F = make_constant(*c2);
+                    let op2: F = make_constant(*c3);
                     composer.arithmetic_gate(|gate| {
                         gate.witness(inputs[&v1], zero, Some(zero))
                             .add(F::one(), F::zero())
-                            .constant(-(make_constant(*c2)/make_constant(*c3)))
+                            .constant(-(op1/op2))
                     });
                     true
                 }) => {},
@@ -277,9 +282,10 @@ where
                     Expression::Term(Term::Variable(v2)),
                     Expression::Term(Term::Constant(c3)),
                 ) if {
+                    let op2: F = make_constant(*c3);
                     composer.arithmetic_gate(|gate| {
                         gate.witness(inputs[&v1], inputs[&v2], Some(zero))
-                            .add(F::one(), -(F::one()/make_constant(*c3)))
+                            .add(F::one(), -(F::one()/op2))
                     });
                     true
                 }) => {},
@@ -292,10 +298,11 @@ where
                     Expression::Term(Term::Constant(c2)),
                     Expression::Term(Term::Variable(v3)),
                 ) if {
+                    let op1: F = make_constant(*c2);
                     composer.arithmetic_gate(|gate| {
                         gate.witness(inputs[&v1], inputs[&v3], Some(zero))
                             .mul(F::one())
-                            .constant(-make_constant(*c2))
+                            .constant(-op1)
                     });
                     true
                 }) => {},
@@ -324,10 +331,12 @@ where
                     Expression::Term(Term::Constant(c2)),
                     Expression::Term(Term::Constant(c3)),
                 ) if {
+                    let op1: F = make_constant(*c2);
+                    let op2: F = make_constant(*c3);
                     composer.arithmetic_gate(|gate| {
                         gate.witness(inputs[&v1], zero, Some(zero))
                             .add(F::one(), F::zero())
-                            .constant(-(make_constant(*c2)*make_constant(*c3)))
+                            .constant(-(op1*op2))
                     });
                     true
                 }) => {},
@@ -340,9 +349,10 @@ where
                     Expression::Term(Term::Variable(v2)),
                     Expression::Term(Term::Constant(c3)),
                 ) if {
+                    let op2: F = make_constant(*c3);
                     composer.arithmetic_gate(|gate| {
                         gate.witness(inputs[&v1], inputs[&v2], Some(zero))
-                            .add(F::one(), -make_constant(*c3))
+                            .add(F::one(), -op2)
                     });
                     true
                 }) => {},
@@ -355,9 +365,10 @@ where
                     Expression::Term(Term::Constant(c2)),
                     Expression::Term(Term::Variable(v3)),
                 ) if {
+                    let op2: F = make_constant(*c2);
                     composer.arithmetic_gate(|gate| {
                         gate.witness(inputs[&v1], inputs[&v3], Some(zero))
-                            .add(F::one(), -make_constant(*c2))
+                            .add(F::one(), -op2)
                     });
                     true
                 }) => {},
@@ -439,9 +450,10 @@ fn run_expr(expr: &Expression, bindings: &mut BTreeMap<ast::Variable, i32>) -> i
 fn run_clause(
     clause: &Clause,
     program: &Program,
-    bindings: &mut BTreeMap<ast::Variable, i32>
-) -> Result<(), Literal> {
-    for literal in &clause.body {
+    bindings: &mut BTreeMap<ast::Variable, i32>,
+) -> Result<HashMap<Vec<usize>, i32>, Literal> {
+    let mut choice_points = HashMap::new();
+    for (literal_idx, literal) in clause.body.iter().enumerate() {
         match literal {
             // Treat equalities with a variable on the LHS as a definition and
             // update the bindings accordingly
@@ -450,8 +462,8 @@ fn run_clause(
                 Expression::Term(Term::Variable(v)),
                 rhs
             ) => {
-                let rhs_val = run_expr(rhs, bindings);
-                match bindings.get(v) {
+                let rhs_val = run_expr(&rhs, bindings);
+                match bindings.get(&v) {
                     Some(lhs_val) if *lhs_val == rhs_val => {},
                     Some(_lhs_val) => return Err(literal.clone()),
                     None => { bindings.insert(v.clone(), rhs_val); },
@@ -459,21 +471,25 @@ fn run_clause(
             },
             // Otherwise just check the given constraints
             Literal::Relation(RelOp::Eq, lhs, rhs) => {
-                if run_expr(lhs, bindings) != run_expr(rhs, bindings) {
+                if run_expr(&lhs, bindings) != run_expr(&rhs, bindings) {
                     return Err(literal.clone())
                 }
             },
             Literal::Relation(RelOp::Ne, lhs, rhs) => {
-                if run_expr(lhs, bindings) == run_expr(rhs, bindings) {
+                if run_expr(&lhs, bindings) == run_expr(&rhs, bindings) {
                     return Err(literal.clone())
                 }
             },
             Literal::Predicate(pred) => {
-                run_query(pred, program, bindings)?
+                let inner_choice_points = run_query(&pred, program, bindings)?;
+                for (mut path, val) in inner_choice_points {
+                    path.insert(0, literal_idx);
+                    choice_points.insert(path, val);
+                }
             }
         }
     }
-    Ok(())
+    Ok(choice_points)
 }
 
 /* Attempts to assign term2 to term1, modifying rbindings as necessary. Returns
@@ -513,9 +529,10 @@ fn run_query(
     query: &Predicate,
     program: &Program,
     bindings: &mut BTreeMap<ast::Variable, i32>
-) -> Result<(), Literal> {
+) -> Result<HashMap<Vec<usize>, i32>, Literal> {
     // Search for a clause that proves the given predicate
-    'search: for clause in &program.assertions[&query.signature()] {
+    let clauses = program.assertions[&query.signature()].iter();
+    'search: for (clause_idx, clause) in clauses.enumerate() {
         // Bind the implicit variables to current clause head
         let mut cbindings = BTreeMap::new();
         let arg_params = query.terms.iter().zip(clause.head.terms.iter());
@@ -526,9 +543,11 @@ fn run_query(
             }
         }
         // Attempt to run the clause
-        if let Err(_) = run_clause(clause, program, &mut cbindings) {
+        let mut choice_points = if let Ok(icp) = run_clause(clause, program, &mut cbindings) {
+            icp
+        } else {
             continue 'search
-        }
+        };
         // Bind the explicit variables from the current clause head
         let mut rbindings = bindings.clone();
         let arg_params = query.terms.iter().zip(clause.head.terms.iter());
@@ -539,7 +558,8 @@ fn run_query(
             }
         }
         *bindings = rbindings;
-        return Ok(())
+        choice_points.insert(vec![], clause_idx as i32);
+        return Ok(choice_points)
     }
     Err(Literal::Predicate(query.clone()))
 }
@@ -571,10 +591,14 @@ fn main() {
         AffineCurve::mul(&generator, JubJubScalar::from(2u64).into_repr())
         .into_affine();
 
-    for query in &orig_program.queries {
+    // Prover POV
+    let mut var_assignments = BTreeMap::new();
+    let mut choice_points = HashMap::new();
+    // Solicit input variables from user and solve for choice point values
+    for (query_idx, query) in annotated_program.queries.iter().enumerate() {
         println!("Query: {:?}", query);
         let mut bindings = BTreeMap::new();
-        for term in &query.terms {
+        for (term_idx, term) in query.terms.iter().enumerate() {
             if let Term::Variable(v) = term {
                 print!("{:?}: ", v);
                 std::io::stdout().flush().expect("flush failed!");
@@ -584,8 +608,44 @@ fn main() {
                     .expect("failed to read input");
                 let x: i32 = input_line.trim().parse().expect("input not an integer");
                 bindings.insert(v.clone(), x);
+                let compiled_var = &compiled_program.queries[query_idx].terms[term_idx];
+                if let Term::Variable(v) = compiled_var {
+                    var_assignments.insert(v.clone(), x);
+                }
             }
         }
-        run_query(query, &annotated_program, &mut bindings).unwrap();
+        let inner_choice_points = run_query(query, &annotated_program, &mut bindings).unwrap();
+        for (mut path, choice) in inner_choice_points {
+            path.insert(0, query_idx);
+            choice_points.insert(path, choice);
+        }
     }
+    // Populate variable definitions
+    let mut definitions = compiled_program.definitions.clone();
+    for (path, choice) in &choice_points {
+        let choice_var = compiled_program.choice_points[path].clone();
+        definitions.insert(choice_var, Expression::Term(Term::Constant(*choice)));
+    }
+    for (var, value) in &var_assignments {
+        definitions.insert(var.clone(), Expression::Term(Term::Constant(*value)));
+    }
+    // Start proving witnesses
+    let mut circuit = PlonkProgram::<BlsScalar, JubJubParameters>::new(compiled_program.clone());
+    for (var, value) in &mut circuit.variable_map {
+        let var_expr = Expression::Term(Term::Variable(var.clone()));
+        let expr_val = evaluate_expr(&var_expr, &mut definitions);
+        *value = make_constant(expr_val);
+    }
+    let (proof, pi) = circuit.gen_proof::<PC>(&pp, pk_p, b"Test").unwrap();
+
+    // Verifier POV
+    let verifier_data = VerifierData::new(vk, pi);
+    let verifier_result = verify_proof::<BlsScalar, JubJubParameters, PC>(
+        &pp,
+        verifier_data.key,
+        &proof,
+        &verifier_data.pi,
+        b"Test",
+    );
+    println!("Verifier Result: {:?}", verifier_result);
 }
