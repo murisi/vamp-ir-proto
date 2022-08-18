@@ -57,6 +57,32 @@ where
         }
         PlonkProgram { program, variable_map, phantom: PhantomData }
     }
+
+    /* Populate the input and auxilliary variables from the given program inputs
+       and choice points. */
+    fn populate_variables(
+        &mut self,
+        var_assignments: BTreeMap<ast::Variable, i32>,
+        choice_points: HashMap<Vec<usize>, i32>
+    ) {
+        // Get the definitions necessary to populate auxiliary variables
+        let mut definitions = self.program.definitions.clone();
+        // Hard-code constant definitions for choice points and variable
+        // assignments
+        for (path, choice) in &choice_points {
+            let choice_var = self.program.choice_points[path].clone();
+            definitions.insert(choice_var, Expression::Term(Term::Constant(*choice)));
+        }
+        for (var, value) in &var_assignments {
+            definitions.insert(var.clone(), Expression::Term(Term::Constant(*value)));
+        }
+        // Start proving witnesses
+        for (var, value) in &mut self.variable_map {
+            let var_expr = Expression::Term(Term::Variable(var.clone()));
+            let expr_val = evaluate_expr(&var_expr, &mut definitions);
+            *value = make_constant(expr_val);
+        }
+    }
 }
 
 impl<F, P> Circuit<F, P> for PlonkProgram<F, P>
@@ -564,18 +590,49 @@ fn run_query(
     Err(Literal::Predicate(query.clone()))
 }
 
+/* Prompt for satisfying inputs to the given program and derive the choice
+ * points that prove them. */
+fn prompt_inputs(
+    annotated: &Program,
+    compiled: &Program
+) ->(BTreeMap<ast::Variable, i32>, HashMap<Vec<usize>, i32>) {
+    let mut var_assignments = BTreeMap::new();
+    let mut choice_points = HashMap::new();
+    // Solicit input variables from user and solve for choice point values
+    for (query_idx, query) in annotated.queries.iter().enumerate() {
+        println!("Query: {:?}", query);
+        let mut bindings = BTreeMap::new();
+        for (term_idx, term) in query.terms.iter().enumerate() {
+            if let Term::Variable(v) = term {
+                print!("{:?}: ", v);
+                std::io::stdout().flush().expect("flush failed!");
+                let mut input_line = String::new();
+                std::io::stdin()
+                    .read_line(&mut input_line)
+                    .expect("failed to read input");
+                let x: i32 = input_line.trim().parse().expect("input not an integer");
+                bindings.insert(v.clone(), x);
+                let compiled_var = &compiled.queries[query_idx].terms[term_idx];
+                if let Term::Variable(v) = compiled_var {
+                    var_assignments.insert(v.clone(), x);
+                }
+            }
+        }
+        let inner_choice_points = run_query(query, &annotated, &mut bindings).unwrap();
+        for (mut path, choice) in inner_choice_points {
+            path.insert(0, query_idx);
+            choice_points.insert(path, choice);
+        }
+    }
+    (var_assignments, choice_points)
+}
+
 fn main() {
     let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
     let orig_program = Program::parse(&unparsed_file).unwrap();
     let (annotated_program, compiled_program) = iterate_program(&orig_program, 4);
     println!("{:#?}", compiled_program);
-    println!("{:#?}", compiled_program.definitions);
-    println!("{:?}", compiled_program.choice_points);
-
-    /*for (var, expr) in &compiled_program.definitions {
-        let val = evaluate_expr(&expr, &mut compiled_program.definitions.clone());
-        println!("{:?} {:?}", var, val);
-}*/
+    
     // Generate CRS
     type PC = SonicKZG10<Bls12_381, DensePolynomial<BlsScalar>>;
     let pp = PC::setup(1 << 10, None, &mut OsRng)
@@ -592,50 +649,12 @@ fn main() {
         .into_affine();
 
     // Prover POV
-    let mut var_assignments = BTreeMap::new();
-    let mut choice_points = HashMap::new();
-    // Solicit input variables from user and solve for choice point values
-    for (query_idx, query) in annotated_program.queries.iter().enumerate() {
-        println!("Query: {:?}", query);
-        let mut bindings = BTreeMap::new();
-        for (term_idx, term) in query.terms.iter().enumerate() {
-            if let Term::Variable(v) = term {
-                print!("{:?}: ", v);
-                std::io::stdout().flush().expect("flush failed!");
-                let mut input_line = String::new();
-                std::io::stdin()
-                    .read_line(&mut input_line)
-                    .expect("failed to read input");
-                let x: i32 = input_line.trim().parse().expect("input not an integer");
-                bindings.insert(v.clone(), x);
-                let compiled_var = &compiled_program.queries[query_idx].terms[term_idx];
-                if let Term::Variable(v) = compiled_var {
-                    var_assignments.insert(v.clone(), x);
-                }
-            }
-        }
-        let inner_choice_points = run_query(query, &annotated_program, &mut bindings).unwrap();
-        for (mut path, choice) in inner_choice_points {
-            path.insert(0, query_idx);
-            choice_points.insert(path, choice);
-        }
-    }
-    // Populate variable definitions
-    let mut definitions = compiled_program.definitions.clone();
-    for (path, choice) in &choice_points {
-        let choice_var = compiled_program.choice_points[path].clone();
-        definitions.insert(choice_var, Expression::Term(Term::Constant(*choice)));
-    }
-    for (var, value) in &var_assignments {
-        definitions.insert(var.clone(), Expression::Term(Term::Constant(*value)));
-    }
-    // Start proving witnesses
     let mut circuit = PlonkProgram::<BlsScalar, JubJubParameters>::new(compiled_program.clone());
-    for (var, value) in &mut circuit.variable_map {
-        let var_expr = Expression::Term(Term::Variable(var.clone()));
-        let expr_val = evaluate_expr(&var_expr, &mut definitions);
-        *value = make_constant(expr_val);
-    }
+    // Prompt for program inputs
+    let (var_assignments, choice_points) = prompt_inputs(&annotated_program, &compiled_program);
+    // Populate variable definitions
+    circuit.populate_variables(var_assignments, choice_points);
+    // Start proving witnesses
     let (proof, pi) = circuit.gen_proof::<PC>(&pp, pk_p, b"Test").unwrap();
 
     // Verifier POV
