@@ -447,7 +447,7 @@ fn bottom_out_recursion(target: &mut Program) {
 
 /* Substitute the given program into itself the given number of times. This
  * function ensures that each clause instantiation receives fesh variables. */
-pub fn iterate_program(base_program: &Program, pow: u32) -> (Program, Program) {
+pub fn compile_program(base_program: &Program, depth: u32) -> (Program, Program) {
     let mut curr_var_id = 0;
     let mut base_program = base_program.clone();
     number_program_variables(&mut base_program, &mut curr_var_id);
@@ -458,7 +458,7 @@ pub fn iterate_program(base_program: &Program, pow: u32) -> (Program, Program) {
     let mut current_program = base_program.clone();
     bottom_out_recursion(&mut current_program);
 
-    for _i in 0..pow {
+    for _i in 0..depth {
         let mut target_program = base_program.clone();
         number_program_variables(&mut target_program, &mut curr_var_id);
         record_explicit_definitions(&mut target_program);

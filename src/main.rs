@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use crate::ast::{Program, Literal, Expression, ArithOp, RelOp, Term, Predicate, Clause};
 use std::io::Write;
 use plonk_core::prelude::VerifierData;
-use crate::transform::{iterate_program, collect_program_variables};
+use crate::transform::{compile_program, collect_program_variables};
 extern crate pest;
 #[macro_use]
 extern crate pest_derive;
@@ -977,7 +977,7 @@ fn main() {
     let iter_count = args[2].parse().expect("unable to parse iteration count");
     println!("{:#?}\n", orig_program);
     println!("Compiling...");
-    let (annotated_program, compiled_program) = iterate_program(&orig_program, iter_count);
+    let (annotated_program, compiled_program) = compile_program(&orig_program, iter_count);
     
     // Generate CRS
     type PC = SonicKZG10<Bls12_381, DensePolynomial<BlsScalar>>;
