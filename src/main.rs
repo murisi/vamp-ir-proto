@@ -958,9 +958,16 @@ fn prompt_inputs(
 }
 
 fn main() {
-    let unparsed_file = fs::read_to_string("tests/transitive.pir").expect("cannot read file");
+    let args: Vec<_> = std::env::args().collect();
+    if args.len() < 2 {
+        panic!("please supply the vamp-ir file path");
+    } else if args.len() < 3 {
+        panic!("please supply the iteration count");
+    }
+    let unparsed_file = fs::read_to_string(args[1].clone()).expect("cannot read file");
     let orig_program = Program::parse(&unparsed_file).unwrap();
-    let (annotated_program, compiled_program) = iterate_program(&orig_program, 4);
+    let iter_count = args[2].parse().expect("unable to parse iteration count");
+    let (annotated_program, compiled_program) = iterate_program(&orig_program, iter_count);
     println!("{:#?}", compiled_program);
     
     // Generate CRS
