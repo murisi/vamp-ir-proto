@@ -1,8 +1,6 @@
-use std::collections::{BTreeSet, HashMap, BTreeMap, VecDeque, HashSet};
-use petgraph::{Graph, Direction};
-use petgraph::prelude::Bfs;
-use petgraph::visit::{Visitable, GraphRef, VisitMap};
-use petgraph::algo::{tarjan_scc, is_cyclic_directed};
+use std::collections::{BTreeSet, HashMap, BTreeMap};
+use petgraph::Graph;
+use petgraph::algo::tarjan_scc;
 use crate::ast::{Signature, Program, Literal, Term, Variable, RelOp, Expression, Clause, ArithOp, Predicate};
 
 /* If this term is a variable, then give that variable the ID corresponding to
@@ -757,58 +755,6 @@ pub fn graph_program_relations(program: &Program) -> Graph<(String, usize), ()> 
     clause_graph
 }
 
-/* Associates all the variables in a clause with a graph node and adds an edge
- * between two variables a, b if there is a literal of the form a = f(b) where
- * f is some function. */
-pub fn graph_clause_variables(clause: &Clause) -> (Graph<Variable, ()>, Variable) {
-    let mut variable_graph = Graph::new();
-    let mut node_map = BTreeMap::new();
-    let constant_variable = Variable::new(u32::MAX);
-    let mut clause_variables = BTreeSet::new();
-    clause_variables.insert(constant_variable.clone());
-    collect_clause_variables(clause, &mut clause_variables);
-    for variable in clause_variables {
-        node_map.insert(variable.clone(), variable_graph.add_node(variable));
-    }
-    for literal in &clause.body {
-        if let Literal::Relation(
-            RelOp::Eq,
-            Expression::Term(Term::Variable(v)),
-            rhs,
-        ) = literal {
-            let mut expression_variables = BTreeSet::new();
-            expression_variables.insert(constant_variable.clone());
-            collect_expression_variables(rhs, &mut expression_variables);
-            for vd in expression_variables {
-                variable_graph.add_edge(
-                    node_map[&v],
-                    node_map[&vd],
-                    (),
-                );
-            }
-        }
-    }
-    (variable_graph, constant_variable)
-}
-
-/// Create a new **Bfs**, using the graph's visitor map, and put **starts**
-/// in the stack of nodes to visit.
-pub fn new_bfs<N, VM, G>(graph: G, starts: HashSet<N>) -> Bfs<N, VM>
-where
-    G: GraphRef + Visitable<NodeId = N, Map = VM>,
-    VM: VisitMap<N>,
-    N: Copy + PartialEq,
-    
-{
-    let mut discovered = graph.visit_map();
-    let mut stack = VecDeque::new();
-    for elt in starts {
-        discovered.visit(elt);
-        stack.push_front(elt);
-    }
-    Bfs { stack, discovered }
-}
-
 /* Determine whether every auxilliary variable in the program is explicitly
  * defined. This is necessary because searching for valid variable assignments
  * for implicitly defined variables can be too computationally expensive. */
@@ -827,62 +773,90 @@ pub fn build_explicit_defs(program: &mut Program) {
             let clauses = program.assertions.get_mut(&signature).unwrap();
             let clauses_len = clauses.len();
             for clause in clauses.iter_mut() {
-                // Graph the dependencies between variables in this clause in
-                // order to determine how auxilliary variable witnesses can be
-                // derived.
-                let (variable_graph, constant) = graph_clause_variables(clause);
-                if is_cyclic_directed(&variable_graph) {
-                    panic!("cyclic explicit variable definitions found");
-                }
-
-                // To facilitate reverse variable lookups
-                let mut node_map = BTreeMap::new();
-                for ix in variable_graph.node_indices() {
-                    node_map.insert(variable_graph[ix].clone(), ix);
-                }
-
-                // Obtain head, clause, and body variable indicies from the
-                // variable graph constructed above.
                 let mut head_variables = BTreeSet::new();
                 collect_predicate_variables(&clause.head, &mut head_variables);
-                let head_variable_ixs: HashSet<_> =
-                    head_variables.into_iter().map(|n| node_map[&n]).collect();
-                let mut clause_variables = BTreeSet::new();
-                collect_clause_variables(clause, &mut clause_variables);
-                let clause_variable_ixs: HashSet<_> =
-                    clause_variables.into_iter().map(|n| node_map[&n]).collect();
-                let body_variable_ixs: HashSet<_> =
-                    clause_variable_ixs.difference(&head_variable_ixs).cloned().collect();
-
-                // Collect a set of variables such that all expressions defined
-                // in terms of them can be explicitly defined by the compiler.
-                // These variables are those either head variables or are
-                // explicitly defined by a predicate used in the body.
-                let mut valid_leafs = HashSet::new();
-                valid_leafs.extend(head_variable_ixs.clone());
-                valid_leafs.insert(node_map[&constant]);
+                // Variables that are defined somewhere in the body
+                let mut new_defined_vars = BTreeSet::new();
+                // Variables we assume to be defined in the beginning
+                let mut defined_vars = BTreeSet::new();
+                collect_predicate_variables(&clause.head, &mut defined_vars);
+                // Variables that are used in defining body variables
+                let mut body_deps = BTreeSet::new();
+                // Check that all variables are defined before use in the clause
+                // body and also maintain data to determine which definitions we
+                // can export.
                 for literal in &clause.body {
-                    if let Literal::Predicate(pred) = literal {
-                        if let Some(explicits) = explicit_params.get(&pred.signature()) {
-                            for (i, is_explicit) in explicits.iter().enumerate() {
-                                if *is_explicit {
-                                    if let Term::Variable(v) = &pred.terms[i] {
-                                        valid_leafs.insert(node_map[&v]);
+                    match literal {
+                        Literal::Relation(
+                            RelOp::Eq,
+                            Expression::Term(Term::Variable(v)),
+                            e2,
+                        ) => {
+                            // In this case we have a definitions. So just make
+                            // sure that all RHS variables are already defined.
+                            let mut rhs_vars = BTreeSet::new();
+                            collect_expression_variables(&e2, &mut rhs_vars);
+                            if rhs_vars.is_subset(&defined_vars) {
+                                new_defined_vars.insert(v.clone());
+                                if !defined_vars.contains(&v) {
+                                    defined_vars.insert(v.clone());
+                                    if !head_variables.contains(&v) {
+                                        body_deps.extend(rhs_vars);
                                     }
+                                }
+                            } else {
+                                panic!("definition {:?} depends on undefined variables", literal);
+                            }
+                        },
+                        Literal::Relation(_, e1, e2) => {
+                            // In this case we just have a plain constraint. So
+                            // just make sure all used variables are already
+                            // defined
+                            let mut vars = BTreeSet::new();
+                            collect_expression_variables(&e1, &mut vars);
+                            collect_expression_variables(&e2, &mut vars);
+                            if !vars.is_subset(&defined_vars) {
+                                panic!("constraint {:?} depends on undefined variables", literal);
+                            }
+                        },
+                        Literal::Predicate(pred) => {
+                            // If the definition of output variables in terms
+                            // of inputs is set, then use this information
+                            if let Some(explicits) = explicit_params.get(&pred.signature()) {
+                                let mut new_defs = BTreeSet::new();
+                                let mut implicit_vars = BTreeSet::new();
+                                // Make sure that all implicit variables are
+                                // already defined
+                                for (i, is_explicit) in explicits.iter().enumerate() {
+                                    if let Term::Variable(v) = &pred.terms[i] {
+                                        if *is_explicit {
+                                            new_defs.insert(v.clone());
+                                        } else if !defined_vars.contains(v) {
+                                            panic!("predicate literal {:?} depends on undefined variables", pred);
+                                        } else {
+                                            implicit_vars.insert(v.clone());
+                                        }
+                                    }
+                                }
+                                // Mark all variables in explicit positions as
+                                // defined now
+                                new_defined_vars.extend(new_defs.clone());
+                                if !new_defs.is_subset(&defined_vars) {
+                                    defined_vars.extend(new_defs.clone());
+                                    if !new_defs.is_subset(&head_variables) {
+                                        body_deps.extend(implicit_vars);
+                                    }
+                                }
+                            } else {
+                                // Otherwise be pessimistic and assume no
+                                // explicit definitions
+                                let mut vars = BTreeSet::new();
+                                collect_predicate_variables(&pred, &mut vars);
+                                if !vars.is_subset(&defined_vars) {
+                                    panic!("predicate literal {:?} depends on undefined variables", pred);
                                 }
                             }
                         }
-                    }
-                }
-
-                // Ensure that the leafs of our variable DAG come from the set
-                // defined above.
-                for ix in variable_graph.node_indices() {
-                    match variable_graph.edges_directed(ix, Direction::Outgoing).next() {
-                        None if !valid_leafs.contains(&ix) =>
-                            panic!("all variables must be explicitly defined \
-                                    from head variables"),
-                        _ => {}
                     }
                 }
 
@@ -892,25 +866,16 @@ pub fn build_explicit_defs(program: &mut Program) {
                     clause.explicits = vec![false; signature.1];
                     continue;
                 }
-
-                // Determine variables depended on by body variables
-                let mut bfs = new_bfs(&variable_graph, body_variable_ixs);
-                let mut body_dependencies = HashSet::new();
-                while let Some(nx) = bfs.next(&variable_graph) {
-                    body_dependencies.insert(nx);
-                }
-                
-                // Determine the explicitly defined head variables that are not
-                // depended on by the body
-                let free_variables: HashSet<_> =
-                    head_variable_ixs.difference(&body_dependencies).cloned().collect();
-                let mut explicit_params = HashSet::new();
-                for var in free_variables {
-                    if let Some(_) =
-                        variable_graph.edges_directed(var, Direction::Outgoing).next() {
-                            explicit_params.insert(var);
-                    }
-                }
+                // Head terms that are given an explicit definition in the body
+                let defined_heads: BTreeSet<_> = head_variables
+                    .intersection(&new_defined_vars)
+                    .cloned()
+                    .collect();
+                // Head terms that in addition are not depended on by the body
+                let explicit_params: BTreeSet<_> = defined_heads
+                    .difference(&body_deps)
+                    .cloned()
+                    .collect();
 
                 // Mark the explicit head variable positions so that future
                 // strongly connected components need not explicitly define
@@ -919,7 +884,7 @@ pub fn build_explicit_defs(program: &mut Program) {
                 for (i, term) in clause.head.terms.iter().enumerate() {
                     match term {
                         Term::Constant(_) => explicit_variables[i] = true,
-                        Term::Variable(v) if explicit_params.contains(&node_map[v]) => {
+                        Term::Variable(v) if explicit_params.contains(&v) => {
                             explicit_variables[i] = true;
                         },
                         _ => {}
