@@ -451,6 +451,7 @@ pub fn iterate_program(base_program: &Program, pow: u32) -> (Program, Program) {
     let mut curr_var_id = 0;
     let mut base_program = base_program.clone();
     number_program_variables(&mut base_program, &mut curr_var_id);
+    replace_program_nes(&mut base_program, &mut curr_var_id);
     build_explicit_defs(&mut base_program);
     record_explicit_definitions(&mut base_program);
     
@@ -915,5 +916,68 @@ fn record_explicit_definitions(program: &mut Program) {
                 }
             }
         }
+    }
+}
+
+/* Make a literal that computes the reciprocal of the given expression and
+ * stores the result in a new variable. */
+fn build_reciprocal_literal(
+    expr: &Expression,
+    curr_var_id: &mut u32,
+) -> Literal {
+    let new_var = Variable::new(*curr_var_id);
+    let new_term = Expression::Term(Term::Variable(new_var.clone()));
+    *curr_var_id += 1;
+    Literal::Relation(
+        RelOp::Eq,
+        new_term,
+        Expression::Binary(
+            ArithOp::Divide,
+            Box::new(Expression::Term(Term::Constant(1))),
+            Box::new(expr.clone())
+        ))
+}
+
+/* If the given literal is a not equal relation, then return an equality
+ * relation that can only be solved if the difference has an inverse. */
+fn convert_ne_literal(
+    literal: Literal,
+    curr_var_id: &mut u32,
+) -> Literal {
+    match literal {
+        Literal::Relation(RelOp::Ne, lhs, Expression::Term(Term::Constant(0))) => {
+            build_reciprocal_literal(&lhs, curr_var_id)
+        },
+        Literal::Relation(RelOp::Ne, Expression::Term(Term::Constant(0)), rhs) => {
+            build_reciprocal_literal(&rhs, curr_var_id)
+        },
+        Literal::Relation(RelOp::Ne, lhs, rhs) => {
+            build_reciprocal_literal(
+                &binary_operation(ArithOp::Minus, lhs.clone(), rhs.clone()),
+                curr_var_id,
+            )
+        },
+        _ => literal,
+    }
+}
+
+/* Replace all the not equal relations in the body with equality relations and
+   divisions. */
+fn replace_program_nes(program: &mut Program, curr_var_id: &mut u32) {
+    for clauses in program.assertions.values_mut() {
+        for clause in clauses {
+            for literal in &mut clause.body {
+                *literal = convert_ne_literal(
+                    literal.clone(),
+                    curr_var_id,
+                );
+            }
+        }
+    }
+    for literal in &mut program.body {
+        *literal = convert_ne_literal(
+            literal.clone(),
+            curr_var_id,
+        );
     }
 }
