@@ -458,7 +458,7 @@ pub fn iterate_program(base_program: &Program, pow: u32) -> (Program, Program) {
     let mut current_program = base_program.clone();
     bottom_out_recursion(&mut current_program);
 
-    for _i in 1..pow {
+    for _i in 0..pow {
         let mut target_program = base_program.clone();
         number_program_variables(&mut target_program, &mut curr_var_id);
         record_explicit_definitions(&mut target_program);

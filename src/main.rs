@@ -1,15 +1,12 @@
 mod ast;
 mod transform;
 use ark_ff::PrimeField;
-use ark_ec::{AffineCurve, ProjectiveCurve, TEModelParameters};
+use ark_ec::TEModelParameters;
 use ark_bls12_381::{Bls12_381, Fr as BlsScalar};
-use ark_ed_on_bls12_381::{
-    EdwardsParameters as JubJubParameters, Fr as JubJubScalar,
-};
+use ark_ed_on_bls12_381::EdwardsParameters as JubJubParameters;
 use plonk_core::circuit::{verify_proof, Circuit};
 use ark_poly_commit::{sonic_pc::SonicKZG10, PolynomialCommitment};
 use ark_poly::polynomial::univariate::DensePolynomial;
-use ark_ec::models::twisted_edwards_extended::GroupAffine;
 use rand_core::OsRng;
 use plonk::error::to_pc_error;
 use plonk_core::constraint_system::StandardComposer;
@@ -807,6 +804,7 @@ fn run_clause(
     clause: &Clause,
     program: &Program,
     bindings: &mut BTreeMap<ast::Variable, i32>,
+    max_depth: u32,
 ) -> Result<HashMap<Vec<usize>, i32>, Literal> {
     let mut choice_points = HashMap::new();
     for (literal_idx, literal) in clause.body.iter().enumerate() {
@@ -837,7 +835,7 @@ fn run_clause(
                 }
             },
             Literal::Predicate(pred) => {
-                let inner_choice_points = run_query(&pred, program, bindings)?;
+                let inner_choice_points = run_query(&pred, program, bindings, max_depth)?;
                 for (mut path, val) in inner_choice_points {
                     path.insert(0, literal_idx);
                     choice_points.insert(path, val);
@@ -884,8 +882,12 @@ fn unify_terms(
 fn run_query(
     query: &Predicate,
     program: &Program,
-    bindings: &mut BTreeMap<ast::Variable, i32>
+    bindings: &mut BTreeMap<ast::Variable, i32>,
+    max_depth: u32,
 ) -> Result<HashMap<Vec<usize>, i32>, Literal> {
+    // Do not look for deeper solutions because they will not be represented in
+    // the circuit
+    if max_depth == 0 { return Err(Literal::Predicate(query.clone())) }
     // Search for a clause that proves the given predicate
     let clauses = program.assertions[&query.signature()].iter();
     'search: for (clause_idx, clause) in clauses.enumerate() {
@@ -899,7 +901,12 @@ fn run_query(
             }
         }
         // Attempt to run the clause
-        let mut choice_points = if let Ok(icp) = run_clause(clause, program, &mut cbindings) {
+        let mut choice_points = if let Ok(icp) = run_clause(
+            clause,
+            program,
+            &mut cbindings,
+            max_depth-1,
+        ) {
             icp
         } else {
             continue 'search
@@ -924,7 +931,8 @@ fn run_query(
  * points that prove them. */
 fn prompt_inputs(
     annotated: &Program,
-    compiled: &Program
+    compiled: &Program,
+    max_depth: u32,
 ) ->(BTreeMap<ast::Variable, i32>, HashMap<Vec<usize>, i32>) {
     let mut var_assignments = BTreeMap::new();
     let mut choice_points = HashMap::new();
@@ -948,7 +956,7 @@ fn prompt_inputs(
                 }
             }
         }
-        let inner_choice_points = run_query(query, &annotated, &mut bindings).unwrap();
+        let inner_choice_points = run_query(query, &annotated, &mut bindings, max_depth).unwrap();
         for (mut path, choice) in inner_choice_points {
             path.insert(0, query_idx);
             choice_points.insert(path, choice);
@@ -967,8 +975,9 @@ fn main() {
     let unparsed_file = fs::read_to_string(args[1].clone()).expect("cannot read file");
     let orig_program = Program::parse(&unparsed_file).unwrap();
     let iter_count = args[2].parse().expect("unable to parse iteration count");
+    println!("{:#?}\n", orig_program);
+    println!("Compiling...");
     let (annotated_program, compiled_program) = iterate_program(&orig_program, iter_count);
-    println!("{:#?}", compiled_program);
     
     // Generate CRS
     type PC = SonicKZG10<Bls12_381, DensePolynomial<BlsScalar>>;
@@ -978,23 +987,23 @@ fn main() {
     let mut circuit = PlonkProgram::<BlsScalar, JubJubParameters>::new(compiled_program.clone());
     // Compile the circuit
     let (pk_p, vk) = circuit.compile::<PC>(&pp).expect("unable to compile circuit");
-
-    let (x, y) = JubJubParameters::AFFINE_GENERATOR_COEFFS;
-    let generator: GroupAffine<JubJubParameters> = GroupAffine::new(x, y);
-    let point_f_pi: GroupAffine<JubJubParameters> =
-        AffineCurve::mul(&generator, JubJubScalar::from(2u64).into_repr())
-        .into_affine();
     
     // Prover POV
+    println!("Proving...");
     let mut circuit = PlonkProgram::<BlsScalar, JubJubParameters>::new(compiled_program.clone());
     // Prompt for program inputs
-    let (var_assignments, choice_points) = prompt_inputs(&annotated_program, &compiled_program);
+    let (var_assignments, choice_points) = prompt_inputs(
+        &annotated_program,
+        &compiled_program,
+        iter_count,
+    );
     // Populate variable definitions
     circuit.populate_variables(var_assignments, choice_points);
     // Start proving witnesses
     let (proof, pi) = circuit.gen_proof::<PC>(&pp, pk_p, b"Test").unwrap();
 
     // Verifier POV
+    println!("Verifying...");
     let verifier_data = VerifierData::new(vk, pi);
     let verifier_result = verify_proof::<BlsScalar, JubJubParameters, PC>(
         &pp,
