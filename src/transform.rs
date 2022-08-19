@@ -238,20 +238,36 @@ fn substitute_program(target: &mut Program, source: Program, curr_var_id: &mut u
     }
 }
 
+/* Produce the given binary operation making sure to do any straightforward
+ * simplifications. */
+fn binary_operation(op: ArithOp, e1: Expression, e2: Expression) -> Expression {
+    match (op, e1, e2) {
+        (ArithOp::Times, Expression::Term(Term::Constant(1)), e2) => e2,
+        (ArithOp::Times, e1, Expression::Term(Term::Constant(1))) => e1,
+        (ArithOp::Times, e1 @ Expression::Term(Term::Constant(0)), _) => e1,
+        (ArithOp::Times, _, e2 @ Expression::Term(Term::Constant(0))) => e2,
+        (ArithOp::Divide, e1, Expression::Term(Term::Constant(1))) => e1,
+        (ArithOp::Plus, Expression::Term(Term::Constant(0)), e2) => e2,
+        (ArithOp::Plus, e1, Expression::Term(Term::Constant(0))) => e1,
+        (ArithOp::Minus, e1, Expression::Term(Term::Constant(0))) => e1,
+        (op, e1, e2) => Expression::Binary(op, Box::new(e1), Box::new(e2))
+    }
+}
+
 /* Produces an expression that is non-zero only if the select line is carrying
  * the given index or if outside the given range. */
 fn build_multiplexer(select_line: Expression, idx: usize, size: usize) -> Expression {
     let mut multiplexer = Expression::Term(Term::Constant(1));
     for j in 0..size {
         if j != idx {
-            multiplexer = Expression::Binary(
+            multiplexer = binary_operation(
                 ArithOp::Times,
-                Box::new(multiplexer),
-                Box::new(Expression::Binary(
+                multiplexer,
+                binary_operation(
                     ArithOp::Minus,
-                    Box::new(select_line.clone()),
-                    Box::new(Expression::Term(Term::Constant(j as i32))),
-                )),
+                    select_line.clone(),
+                    Expression::Term(Term::Constant(j as i32)),
+                ),
             );
         }
     }
@@ -263,14 +279,14 @@ fn equality_or_sat(expr1: Expression, expr2: Expression, else_expr: Expression) 
     Literal::Relation(
         RelOp::Eq,
         Expression::Term(Term::Constant(0)),
-        Expression::Binary(
+        binary_operation(
             ArithOp::Times,
-            Box::new(else_expr.clone()),
-            Box::new(Expression::Binary(
+            else_expr.clone(),
+            binary_operation(
                 ArithOp::Minus,
-                Box::new(expr1),
-                Box::new(expr2),
-            ))
+                expr1,
+                expr2,
+            )
         )
     )
 }
@@ -537,13 +553,47 @@ fn flatten_literal_expressions(
             Expression::Term(Term::Variable(_)),
             Expression::Binary(_, e1, e2),
         ) if matches!((&*e1, &*e2), (Expression::Term(_), Expression::Term(_))) => literal,
+        Literal::Relation(
+            RelOp::Eq,
+            e1,
+            Expression::Term(Term::Constant(0)),
+        ) => {
+            let lhs_term = flatten_expression(
+                &e1,
+                literals,
+                definitions,
+                curr_var_id
+            );
+            Literal::Relation(
+                RelOp::Eq,
+                Expression::Term(lhs_term),
+                Expression::Term(Term::Constant(0))
+            )
+        },
+        Literal::Relation(
+            RelOp::Eq,
+            Expression::Term(Term::Constant(0)),
+            e2,
+        ) => {
+            let lhs_term = flatten_expression(
+                &e2,
+                literals,
+                definitions,
+                curr_var_id
+            );
+            Literal::Relation(
+                RelOp::Eq,
+                Expression::Term(lhs_term),
+                Expression::Term(Term::Constant(0))
+            )
+        },
         // Literal is not in three address form, so flatten it
         Literal::Relation(RelOp::Eq, e1, e2) => {
             let lhs_term = flatten_expression(
-                &Expression::Binary(
+                &binary_operation(
                     ArithOp::Minus,
-                    Box::new(e1.clone()),
-                    Box::new(e2.clone()),
+                    e1.clone(),
+                    e2.clone(),
                 ),
                 literals,
                 definitions,
