@@ -479,47 +479,64 @@ pub fn iterate_program(base_program: &Program, pow: u32) -> (Program, Program) {
  * of its parts into the given vector. The parts always take the following form:
  * term1 = -term2 or term1 = term2 OP term3 */
 fn flatten_expression(
+    out: Option<Term>,
     expr: &Expression,
     literals: &mut Vec<Literal>,
     definitions: &mut BTreeMap<Variable, Expression>,
     curr_var_id: &mut u32,
 ) -> Term {
     match expr {
-        Expression::Term(t) => t.clone(),
+        Expression::Term(t) => {
+            if let Some(out) = out {
+                literals.push(Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(out.clone()),
+                    expr.clone(),
+                ));
+                if let Term::Variable(out_var) = &out {
+                    definitions.insert(out_var.clone(), expr.clone());
+                }
+                out
+            } else {
+                t.clone()
+            }
+        },
         Expression::Negate(n) => {
-            let inner = flatten_expression(n, literals, definitions, curr_var_id);
-            let new_var = Variable::new(*curr_var_id);
+            let out1_term = flatten_expression(None, n, literals, definitions, curr_var_id);
+            let rhs = Expression::Negate(Box::new(Expression::Term(out1_term)));
+            let out_var = Variable::new(*curr_var_id);
             *curr_var_id += 1;
-            let lhs = Term::Variable(new_var.clone());
-            let rhs = Expression::Negate(Box::new(Expression::Term(inner)));
-            definitions.insert(new_var, rhs.clone());
-            let new_term = Literal::Relation(
+            let out = out.unwrap_or(Term::Variable(out_var.clone()));
+            if let Term::Variable(out_var) = &out {
+                definitions.insert(out_var.clone(), rhs.clone());
+            }
+            literals.push(Literal::Relation(
                 RelOp::Eq,
-                Expression::Term(lhs.clone()),
+                Expression::Term(out.clone()),
                 rhs,
-            );
-            literals.push(new_term);
-            lhs
+            ));
+            out
         },
         Expression::Binary(op, e1, e2) => {
-            let inner1 = flatten_expression(e1, literals, definitions, curr_var_id);
-            let inner2 = flatten_expression(e2, literals, definitions, curr_var_id);
-            let new_var = Variable::new(*curr_var_id);
-            *curr_var_id += 1;
-            let lhs = Term::Variable(new_var.clone());
+            let out1_term = flatten_expression(None, e1, literals, definitions, curr_var_id);
+            let out2_term = flatten_expression(None, e2, literals, definitions, curr_var_id);
             let rhs = Expression::Binary(
                 op.clone(),
-                Box::new(Expression::Term(inner1)),
-                Box::new(Expression::Term(inner2)),
+                Box::new(Expression::Term(out1_term)),
+                Box::new(Expression::Term(out2_term)),
             );
-            definitions.insert(new_var, rhs.clone());
-            let new_term = Literal::Relation(
+            let out_var = Variable::new(*curr_var_id);
+            *curr_var_id += 1;
+            let out = out.unwrap_or(Term::Variable(out_var.clone()));
+            if let Term::Variable(out_var) = &out {
+                definitions.insert(out_var.clone(), rhs.clone());
+            }
+            literals.push(Literal::Relation(
                 RelOp::Eq,
-                Expression::Term(lhs.clone()),
+                Expression::Term(out.clone()),
                 rhs,
-            );
-            literals.push(new_term);
-            lhs
+            ));
+            out
         }
     }
 }
@@ -531,65 +548,66 @@ fn flatten_literal_expressions(
     literals: &mut Vec<Literal>,
     definitions: &mut BTreeMap<Variable, Expression>,
     curr_var_id: &mut u32,
-) -> Literal {
+) {
     match literal.clone() {
         Literal::Relation(RelOp::Ne, _, _) =>
             unreachable!("not equal literals should not be present at this stage"),
-        Literal::Predicate(_) => literal,
+        Literal::Predicate(_) => {
+            literals.push(literal);
+        },
         // If the given literal is already in three address from, then do not
         // try to flatten it again
         Literal::Relation(
             RelOp::Eq,
             Expression::Term(Term::Variable(_)),
             Expression::Term(_),
-        ) => literal,
+        ) => {
+            literals.push(literal);
+        },
         Literal::Relation(
             RelOp::Eq,
             Expression::Term(Term::Variable(_)),
             Expression::Negate(e),
-        ) if matches!(&*e, Expression::Term(_)) => literal,
+        ) if matches!(&*e, Expression::Term(_)) => {
+            literals.push(literal);
+        },
         Literal::Relation(
             RelOp::Eq,
             Expression::Term(Term::Variable(_)),
             Expression::Binary(_, e1, e2),
-        ) if matches!((&*e1, &*e2), (Expression::Term(_), Expression::Term(_))) => literal,
+        ) if matches!((&*e1, &*e2), (Expression::Term(_), Expression::Term(_))) => {
+            literals.push(literal);
+        },
         Literal::Relation(
             RelOp::Eq,
             e1,
             Expression::Term(Term::Constant(0)),
         ) => {
-            let lhs_term = flatten_expression(
+            flatten_expression(
+                Some(Term::Constant(0)),
                 &e1,
                 literals,
                 definitions,
                 curr_var_id
             );
-            Literal::Relation(
-                RelOp::Eq,
-                Expression::Term(lhs_term),
-                Expression::Term(Term::Constant(0))
-            )
         },
         Literal::Relation(
             RelOp::Eq,
             Expression::Term(Term::Constant(0)),
             e2,
         ) => {
-            let lhs_term = flatten_expression(
+            flatten_expression(
+                Some(Term::Constant(0)),
                 &e2,
                 literals,
                 definitions,
                 curr_var_id
             );
-            Literal::Relation(
-                RelOp::Eq,
-                Expression::Term(lhs_term),
-                Expression::Term(Term::Constant(0))
-            )
         },
         // Literal is not in three address form, so flatten it
         Literal::Relation(RelOp::Eq, e1, e2) => {
-            let lhs_term = flatten_expression(
+            flatten_expression(
+                Some(Term::Constant(0)),
                 &binary_operation(
                     ArithOp::Minus,
                     e1.clone(),
@@ -599,11 +617,6 @@ fn flatten_literal_expressions(
                 definitions,
                 curr_var_id
             );
-            Literal::Relation(
-                RelOp::Eq,
-                Expression::Term(lhs_term),
-                Expression::Term(Term::Constant(0))
-            )
         }
     }
 }
@@ -616,14 +629,14 @@ fn flatten_clause_expressions(
 ) {
     let mut expr_literals = Vec::new();
     for literal in clause.body.iter_mut() {
-        *literal = flatten_literal_expressions(
+        flatten_literal_expressions(
             literal.clone(),
             &mut expr_literals,
             &mut clause.definitions,
             curr_var_id,
         );
     }
-    clause.body.append(&mut expr_literals);
+    clause.body = expr_literals;
 }
 
 /* Flatten all expressions occuring in the program, creating additional clause
@@ -634,14 +647,14 @@ fn flatten_program_expressions(
 ) {
     let mut expr_literals = Vec::new();
     for literal in &mut program.body {
-        *literal = flatten_literal_expressions(
+        flatten_literal_expressions(
             literal.clone(),
             &mut expr_literals,
             &mut program.definitions,
             curr_var_id
         );
     }
-    program.body.append(&mut expr_literals);
+    program.body = expr_literals;
     for clauses in program.assertions.values_mut() {
         for clause in clauses {
             flatten_clause_expressions(clause, curr_var_id);

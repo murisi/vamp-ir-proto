@@ -84,7 +84,7 @@ where
         for (var, value) in &var_assignments {
             definitions.insert(var.clone(), Expression::Term(Term::Constant(*value)));
         }
-        // Start proving witnesses
+        // Start deriving witnesses
         for (var, value) in &mut self.variable_map {
             let var_expr = Expression::Term(Term::Variable(var.clone()));
             let expr_val = evaluate_expr(&var_expr, &mut definitions);
@@ -113,6 +113,7 @@ where
             match literal.clone() {
                 Literal::Predicate(_) =>
                     panic!("compilation should leave no predicates"),
+                // Variables on the LHS
                 // v1 = v2
                 Literal::Relation(
                     RelOp::Eq,
@@ -133,7 +134,7 @@ where
                     composer.arithmetic_gate(|gate| {
                         gate.witness(inputs[&v1], zero, Some(zero))
                             .add(F::one(), F::zero())
-                            .constant(make_constant(c2))
+                            .constant(make_constant(-c2))
                     });
                 },
                 // v1 = -c2
@@ -422,7 +423,328 @@ where
                     });
                     true
                 }) => {},
-                _ => {}
+                // Now for constants on the LHS
+                // c1 = v2
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Term(Term::Variable(v2)),
+                ) => {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], zero, Some(zero))
+                            .add(F::one(), F::zero())
+                            .constant(make_constant(-c1))
+                    });
+                },
+                // c1 = c2
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Term(Term::Constant(c2)),
+                ) => {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(zero, zero, Some(zero))
+                            .add(F::zero(), F::zero())
+                            .constant(make_constant(c2-c1))
+                    });
+                },
+                // c1 = -c2
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Negate(e2),
+                ) if matches!(&*e2, Expression::Term(Term::Constant(c2)) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(zero, zero, Some(zero))
+                            .add(F::zero(), F::zero())
+                            .constant(make_constant(c1+*c2))
+                    });
+                    true
+                }) => {},
+                // c1 = -v2
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Negate(e2),
+                ) if matches!(&*e2, Expression::Term(Term::Variable(v2)) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], zero, Some(zero))
+                            .add(F::one(), F::zero())
+                            .constant(make_constant(c1))
+                    });
+                    true
+                }) => {},
+                // c1 = c2 + c3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Plus, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Constant(c2)),
+                    Expression::Term(Term::Constant(c3)),
+                ) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(zero, zero, Some(zero))
+                            .add(F::zero(), F::zero())
+                            .constant(make_constant(c1-c2-c3))
+                    });
+                    true
+                }) => {},
+                // c1 = v2 + c3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Plus, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Variable(v2)),
+                    Expression::Term(Term::Constant(c3)),
+                ) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], zero, Some(zero))
+                            .add(F::one(), F::zero())
+                            .constant(make_constant(c3-c1))
+                    });
+                    true
+                }) => {},
+                // c1 = c2 + v3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Plus, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Constant(c2)),
+                    Expression::Term(Term::Variable(v3)),
+                ) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v3], zero, Some(zero))
+                            .add(F::one(), F::zero())
+                            .constant(make_constant(c2-c1))
+                    });
+                    true
+                }) => {},
+                // c1 = v2 + v3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Plus, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Variable(v2)),
+                    Expression::Term(Term::Variable(v3)),
+                ) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], inputs[&v3], Some(zero))
+                            .add(F::one(), F::one())
+                            .constant(make_constant(-c1))
+                    });
+                    true
+                }) => {},
+                // c1 = c2 - c3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Minus, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Constant(c2)),
+                    Expression::Term(Term::Constant(c3)),
+                ) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(zero, zero, Some(zero))
+                            .add(F::zero(), F::zero())
+                            .constant(make_constant(c2-c3-c1))
+                    });
+                    true
+                }) => {},
+                // c1 = v2 - c3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Minus, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Variable(v2)),
+                    Expression::Term(Term::Constant(c3)),
+                ) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], zero, Some(zero))
+                            .add(F::one(), F::zero())
+                            .constant(make_constant(-*c3-c1))
+                    });
+                    true
+                }) => {},
+                // c1 = c2 - v3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Minus, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Constant(c2)),
+                    Expression::Term(Term::Variable(v3)),
+                ) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v3], zero, Some(zero))
+                            .add(F::one(), F::zero())
+                            .constant(make_constant(c1-c2))
+                    });
+                    true
+                }) => {},
+                // c1 = v2 - v3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Minus, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Variable(v2)),
+                    Expression::Term(Term::Variable(v3)),
+                ) if {
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], inputs[&v3], Some(zero))
+                            .add(F::one(), -F::one())
+                            .constant(make_constant(-c1))
+                    });
+                    true
+                }) => {},
+                // c1 = c2 / c3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Divide, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Constant(c2)),
+                    Expression::Term(Term::Constant(c3)),
+                ) if {
+                    let op1: F = make_constant(c1);
+                    let op2: F = make_constant(*c2);
+                    let op3: F = make_constant(*c3);
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(zero, zero, Some(zero))
+                            .add(F::zero(), F::zero())
+                            .constant(op1-(op2/op3))
+                    });
+                    true
+                }) => {},
+                // c1 = v2 / c3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Divide, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Variable(v2)),
+                    Expression::Term(Term::Constant(c3)),
+                ) if {
+                    let op1: F = make_constant(c1);
+                    let op3: F = make_constant(*c3);
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], zero, Some(zero))
+                            .add(F::one(), F::zero())
+                            .constant(-(op1*op3))
+                    });
+                    true
+                }) => {},
+                // c1 = c2 / v3 ***
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Divide, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Constant(c2)),
+                    Expression::Term(Term::Variable(v3)),
+                ) if {
+                    let op1: F = make_constant(c1);
+                    let op2: F = make_constant(*c2);
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v3], zero, Some(zero))
+                            .constant(-(op2/op1))
+                    });
+                    true
+                }) => {},
+                // c1 = v2 / v3 ***
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Divide, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Variable(v2)),
+                    Expression::Term(Term::Variable(v3)),
+                ) if {
+                    let op1: F = make_constant(c1);
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], inputs[&v3], Some(zero))
+                            .add(F::one(), -op1)
+                    });
+                    true
+                }) => {},
+                // c1 = c2 * c3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Times, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Constant(c2)),
+                    Expression::Term(Term::Constant(c3)),
+                ) if {
+                    let op1: F = make_constant(c1);
+                    let op2: F = make_constant(*c2);
+                    let op3: F = make_constant(*c3);
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(zero, zero, Some(zero))
+                            .add(F::zero(), F::zero())
+                            .constant(op1-(op2*op3))
+                    });
+                    true
+                }) => {},
+                // c1 = v2 * c3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Times, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Variable(v2)),
+                    Expression::Term(Term::Constant(c3)),
+                ) if {
+                    let op1: F = make_constant(c1);
+                    let op3: F = make_constant(*c3);
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], zero, Some(zero))
+                            .add(op3, F::zero())
+                            .constant(-op1)
+                    });
+                    true
+                }) => {},
+                // c1 = c2 * v3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Times, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Constant(c2)),
+                    Expression::Term(Term::Variable(v3)),
+                ) if {
+                    let op1: F = make_constant(c1);
+                    let op2: F = make_constant(*c2);
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v3], zero, Some(zero))
+                            .add(op2, F::zero())
+                            .constant(-op1)
+                    });
+                    true
+                }) => {},
+                // c1 = v2 * v3
+                Literal::Relation(
+                    RelOp::Eq,
+                    Expression::Term(Term::Constant(c1)),
+                    Expression::Binary(ArithOp::Times, e2, e3),
+                ) if matches!((&*e2, &*e3), (
+                    Expression::Term(Term::Variable(v2)),
+                    Expression::Term(Term::Variable(v3)),
+                ) if {
+                    let op1: F = make_constant(c1);
+                    composer.arithmetic_gate(|gate| {
+                        gate.witness(inputs[&v2], inputs[&v3], Some(zero))
+                            .mul(F::one())
+                            .out(-op1)
+                    });
+                    true
+                }) => {},
+                _ => panic!("unsupported constraint encountered")
             }
         }
         Ok(())
@@ -655,7 +977,7 @@ fn main() {
     let point_f_pi: GroupAffine<JubJubParameters> =
         AffineCurve::mul(&generator, JubJubScalar::from(2u64).into_repr())
         .into_affine();
-
+    
     // Prover POV
     let mut circuit = PlonkProgram::<BlsScalar, JubJubParameters>::new(compiled_program.clone());
     // Prompt for program inputs
