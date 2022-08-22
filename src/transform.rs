@@ -415,7 +415,7 @@ fn flatten_program_predicates(target: &mut Program) {
                             clause.definitions.extend(iclause.definitions.clone());
                             for (mut path, select_var) in iclause.choice_points.clone() {
                                 path.insert(0, literal_pos);
-                                target.choice_points.insert(path, select_var);
+                                clause.choice_points.insert(path, select_var);
                             }
                         }
                     },
